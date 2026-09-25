@@ -18,7 +18,7 @@ logging.basicConfig(
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-SEP = "─" * 10  # 10 длинных тире
+SEP = "—" * 10  # 10 длинных тире
 
 
 # ==================== FSM ====================
