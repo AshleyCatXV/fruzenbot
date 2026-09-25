@@ -4,7 +4,6 @@ DB = "bot.db"
 
 async def init_db():
     async with aiosqlite.connect(DB) as db:
-        # Пользователи
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -15,28 +14,24 @@ async def init_db():
                 uuid TEXT DEFAULT ''
             )
         """)
-        # Глобальные переменные
         await db.execute("""
             CREATE TABLE IF NOT EXISTS globals (
                 key TEXT PRIMARY KEY,
                 value TEXT
             )
         """)
-        # Фракции
         await db.execute("""
             CREATE TABLE IF NOT EXISTS factions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT UNIQUE
             )
         """)
-        # Whitelist игроков
         await db.execute("""
             CREATE TABLE IF NOT EXISTS whitelist (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 nick TEXT UNIQUE
             )
         """)
-        # Ссылки (список)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS links (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,14 +39,12 @@ async def init_db():
                 url TEXT
             )
         """)
-        # Картинки / файлы (по ключу)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS images (
                 key TEXT PRIMARY KEY,
                 file_id TEXT
             )
         """)
-        # Ресурспак (file_id + инструкция)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS resourcepack (
                 key TEXT PRIMARY KEY,
@@ -88,8 +81,16 @@ async def set_user_field(user_id: int, field: str, value: str):
 
 async def get_all_users():
     async with aiosqlite.connect(DB) as db:
-        async with db.execute("SELECT user_id FROM users") as cur:
-            return [r[0] for r in await cur.fetchall()]
+        async with db.execute("SELECT user_id, username FROM users ORDER BY user_id") as cur:
+            return await cur.fetchall()
+
+async def find_user_by_nick_server(nick: str):
+    async with aiosqlite.connect(DB) as db:
+        async with db.execute(
+            "SELECT user_id, username, nick_server FROM users WHERE LOWER(nick_server)=LOWER(?)",
+            (nick,)
+        ) as cur:
+            return await cur.fetchone()
 
 # ---------- Глобальные ----------
 async def set_global(key: str, value: str):
@@ -113,9 +114,9 @@ async def add_faction(name: str):
         await db.execute("INSERT OR IGNORE INTO factions (name) VALUES (?)", (name,))
         await db.commit()
 
-async def remove_faction(name: str):
+async def remove_faction_by_id(fid: int):
     async with aiosqlite.connect(DB) as db:
-        await db.execute("DELETE FROM factions WHERE name=?", (name,))
+        await db.execute("DELETE FROM factions WHERE id=?", (fid,))
         await db.commit()
 
 async def get_factions():
@@ -129,9 +130,9 @@ async def add_whitelist(nick: str):
         await db.execute("INSERT OR IGNORE INTO whitelist (nick) VALUES (?)", (nick,))
         await db.commit()
 
-async def remove_whitelist(nick: str):
+async def remove_whitelist_by_id(wid: int):
     async with aiosqlite.connect(DB) as db:
-        await db.execute("DELETE FROM whitelist WHERE nick=?", (nick,))
+        await db.execute("DELETE FROM whitelist WHERE id=?", (wid,))
         await db.commit()
 
 async def get_whitelist():
@@ -171,6 +172,11 @@ async def get_image(key: str):
             row = await cur.fetchone()
             return row[0] if row else None
 
+async def delete_image(key: str):
+    async with aiosqlite.connect(DB) as db:
+        await db.execute("DELETE FROM images WHERE key=?", (key,))
+        await db.commit()
+
 # ---------- Ресурспак ----------
 async def set_resourcepack(file_id: str, instruction: str):
     async with aiosqlite.connect(DB) as db:
@@ -185,3 +191,8 @@ async def get_resourcepack():
     async with aiosqlite.connect(DB) as db:
         async with db.execute("SELECT file_id, instruction FROM resourcepack WHERE key='main'") as cur:
             return await cur.fetchone()
+
+async def delete_resourcepack():
+    async with aiosqlite.connect(DB) as db:
+        await db.execute("DELETE FROM resourcepack WHERE key='main'")
+        await db.commit()
