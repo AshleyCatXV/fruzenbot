@@ -184,4 +184,4 @@ async def set_resourcepack(file_id: str, instruction: str):
 async def get_resourcepack():
     async with aiosqlite.connect(DB) as db:
         async with db.execute("SELECT file_id, instruction FROM resourcepack WHERE key='main'") as cur:
-            return await cur.fetchone()ы
+            return await cur.fetchone()
