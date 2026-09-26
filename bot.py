@@ -1,8 +1,14 @@
 import asyncio
 import logging
+import os
+import shutil
+import sqlite3
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import CommandStart, Command
+from aiogram.types import (
+    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
+    FSInputFile
+)
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 
@@ -11,7 +17,8 @@ from config import BOT_TOKEN, ADMIN_ID
 from keyboards import (
     main_kb, admin_kb, back_kb, profile_kb,
     admin_map_kb, admin_rp_kb, admin_factions_kb,
-    admin_whitelist_kb, admin_links_kb, paginated_kb
+    admin_whitelist_kb, admin_links_kb, paginated_kb,
+    paginated_users_kb, user_profile_admin_kb
 )
 
 logging.basicConfig(
@@ -30,22 +37,34 @@ class Form(StatesGroup):
     edit_nick_bot = State()
     edit_nick_server = State()
     edit_uuid = State()
+
     admin_add_faction = State()
-    admin_del_faction = State()
     admin_assign_faction = State()
+
     admin_add_wl = State()
-    admin_del_wl = State()
+
     admin_add_link = State()
-    admin_del_link = State()
+    admin_rules_url = State()
+
     admin_set_global = State()
-    admin_send_user = State()
+
     admin_upload_map = State()
     admin_upload_rp = State()
     admin_rp_instruction = State()
 
+    admin_edit_user = State()
+
 
 def is_admin(uid: int) -> bool:
     return uid == ADMIN_ID
+
+
+def user_label(user_id: int, username: str, first_name: str = "", nick_bot: str = "") -> str:
+    if username:
+        return f"@{username} ({user_id})"
+    if first_name:
+        return f"{first_name} ({user_id})"
+    return str(user_id)
 
 
 # ==================== ВСПОМОГАТЕЛЬНОЕ ====================
@@ -60,7 +79,6 @@ async def _main_menu_text(user_id: int) -> str:
 
 
 async def show_main_menu(target, user_id: int):
-    """Открывает главное меню. target — Message или CallbackQuery."""
     text = await _main_menu_text(user_id)
     kb = main_kb(is_admin(user_id))
     if isinstance(target, CallbackQuery):
@@ -76,8 +94,18 @@ async def show_main_menu(target, user_id: int):
         await target.answer(text, reply_markup=kb)
 
 
+async def safe_edit(c: CallbackQuery, text: str, reply_markup=None):
+    try:
+        await c.message.edit_text(text, reply_markup=reply_markup)
+    except Exception:
+        try:
+            await c.message.delete()
+        except Exception:
+            pass
+        await bot.send_message(c.from_user.id, text, reply_markup=reply_markup)
+
+
 async def _fake_cb(m: Message):
-    """Псевдо-CallbackQuery, чтобы вернуть пользователя в нужное меню."""
     class FakeMsg:
         async def edit_text(self, *a, **kw):
             return await m.answer(*a, **kw)
@@ -89,22 +117,54 @@ async def _fake_cb(m: Message):
     return FakeCb()
 
 
-async def safe_edit(c: CallbackQuery, text: str, reply_markup=None):
-    """Пытается отредактировать сообщение, если нельзя — удаляет и отправляет новое."""
-    try:
-        await c.message.edit_text(text, reply_markup=reply_markup)
-    except Exception:
-        try:
-            await c.message.delete()
-        except Exception:
-            pass
-        await bot.send_message(c.from_user.id, text, reply_markup=reply_markup)
+class _FakeCbForProfile:
+    """Псевдо-CallbackQuery для возврата в профиль после ввода."""
+    def __init__(self, user):
+        self.from_user = user
+        self.message = self
+
+    async def edit_text(self, *a, **kw):
+        # Ничего не редактируем — отправим новым сообщением через show_profile
+        pass
+
+    async def answer(self, *a, **kw):
+        pass
+
+
+async def show_profile(c: CallbackQuery, target_user_id: int, admin_view: bool = False):
+    u = await db.get_user(target_user_id)
+    if not u:
+        await safe_edit(c, "❌ Пользователь не найден.",
+                        back_kb("admin_users" if admin_view else "back_main"))
+        return
+
+    text = (
+        f"👤 Профиль {user_label(u[0], u[1], '', u[2])}.\n" + SEP + "\n\n"
+        f"Ник в боте: {u[2] or '—'}\n"
+        f"Ник на сервере: {u[3] or '—'}\n"
+        f"Фракция: {u[4] or '—'}\n"
+        f"UUID: {u[5] or '—'}"
+    )
+    if admin_view:
+        kb = user_profile_admin_kb(target_user_id)
+    else:
+        kb = profile_kb()
+
+    # Если c — это _FakeCbForProfile, просто отправим новое сообщение
+    if isinstance(c, _FakeCbForProfile):
+        await bot.send_message(target_user_id, text, reply_markup=kb)
+    else:
+        await safe_edit(c, text, kb)
 
 
 # ==================== /start ====================
 @dp.message(CommandStart())
 async def start(m: Message):
-    await db.add_user(m.from_user.id, m.from_user.username or "")
+    await db.add_user(
+        m.from_user.id,
+        m.from_user.username or "",
+        m.from_user.first_name or ""
+    )
     await show_main_menu(m, m.from_user.id)
 
 
@@ -205,18 +265,7 @@ async def links_view(c: CallbackQuery):
 # ==================== 6. ПРОФИЛЬ ====================
 @dp.callback_query(F.data == "profile")
 async def profile_view(c: CallbackQuery):
-    u = await db.get_user(c.from_user.id)
-    if not u:
-        await db.add_user(c.from_user.id, c.from_user.username or "")
-        u = await db.get_user(c.from_user.id)
-    text = (
-        "👤 Профиль.\n" + SEP + "\n\n"
-        f"Ник в боте: {u[2] or '—'}\n"
-        f"Ник на сервере: {u[3] or '—'}\n"
-        f"Фракция: {u[4] or '—'}\n"
-        f"UUID: {u[5] or '—'}"
-    )
-    await safe_edit(c, text, profile_kb())
+    await show_profile(c, c.from_user.id, admin_view=False)
     await c.answer()
 
 
@@ -232,7 +281,7 @@ async def save_nick_bot(m: Message, state: FSMContext):
     await db.set_user_field(m.from_user.id, "nick_bot", m.text.strip())
     await state.clear()
     await m.answer("✅ Ник в боте обновлён.")
-    await show_main_menu(m, m.from_user.id)
+    await show_profile(_FakeCbForProfile(m.from_user), m.from_user.id, admin_view=False)
 
 
 @dp.callback_query(F.data == "edit_nick_server")
@@ -247,7 +296,7 @@ async def save_nick_server(m: Message, state: FSMContext):
     await db.set_user_field(m.from_user.id, "nick_server", m.text.strip())
     await state.clear()
     await m.answer("✅ Ник на сервере обновлён.")
-    await show_main_menu(m, m.from_user.id)
+    await show_profile(_FakeCbForProfile(m.from_user), m.from_user.id, admin_view=False)
 
 
 @dp.callback_query(F.data == "edit_uuid")
@@ -262,7 +311,7 @@ async def save_uuid(m: Message, state: FSMContext):
     await db.set_user_field(m.from_user.id, "uuid", m.text.strip())
     await state.clear()
     await m.answer("✅ UUID обновлён.")
-    await show_main_menu(m, m.from_user.id)
+    await show_profile(_FakeCbForProfile(m.from_user), m.from_user.id, admin_view=False)
 
 
 # ==================== 7. ПРАВИЛА ====================
@@ -351,17 +400,19 @@ async def admin_faction_del(c: CallbackQuery):
     if not rows:
         await c.answer("Фракций нет.", show_alert=True)
         return
-    kb = paginated_kb(rows, 0, PER_PAGE, "faction_del:", "admin_factions")
+    await _render_faction_del_page(c, 0)
+
+
+async def _render_faction_del_page(c: CallbackQuery, page: int):
+    rows = await db.get_factions()
+    kb = paginated_kb(rows, page, PER_PAGE, "faction_del:", "admin_factions")
     await safe_edit(c, "🚩 Выбери фракцию для удаления.\n" + SEP, kb)
-    await c.answer()
 
 
 @dp.callback_query(F.data.startswith("pg:faction_del:"))
 async def faction_del_page(c: CallbackQuery):
     page = int(c.data.split(":")[2])
-    rows = await db.get_factions()
-    kb = paginated_kb(rows, page, PER_PAGE, "faction_del:", "admin_factions")
-    await safe_edit(c, "🚩 Выбери фракцию для удаления.\n" + SEP, kb)
+    await _render_faction_del_page(c, page)
     await c.answer()
 
 
@@ -375,70 +426,75 @@ async def faction_del(c: CallbackQuery):
     if not rows:
         await safe_edit(c, "✅ Фракция удалена.\n\nСписок фракций пуст.", admin_factions_kb())
     else:
-        kb = paginated_kb(rows, 0, PER_PAGE, "faction_del:", "admin_factions")
-        await safe_edit(c, "✅ Фракция удалена.\n\n🚩 Выбери следующую для удаления.\n" + SEP, kb)
+        await _render_faction_del_page(c, 0)
     await c.answer("Удалено")
 
 
 @dp.callback_query(F.data == "admin_faction_assign")
-async def admin_faction_assign(c: CallbackQuery, state: FSMContext):
+async def admin_faction_assign(c: CallbackQuery):
     if not is_admin(c.from_user.id):
         return await c.answer("Нет доступа", show_alert=True)
-    await c.message.answer("Введи ник игрока на сервере, которому назначить фракцию:")
-    await state.set_state(Form.admin_assign_faction)
+    users = await db.get_all_users()
+    if not users:
+        await c.answer("Пользователей нет.", show_alert=True)
+        return
+    await _render_user_pick_page(c, 0, "faction_assign_user", "admin_factions")
+
+
+async def _render_user_pick_page(c: CallbackQuery, page: int, prefix: str, back_target: str):
+    users = await db.get_all_users()
+    kb = paginated_users_kb(users, page, f"{prefix}:", back_target)
+    await safe_edit(c, "🎯 Выбери игрока.\n" + SEP, kb)
+
+
+@dp.callback_query(F.data.startswith("upg:faction_assign_user:"))
+async def faction_assign_user_page(c: CallbackQuery):
+    page = int(c.data.split(":")[2])
+    await _render_user_pick_page(c, page, "faction_assign_user", "admin_factions")
     await c.answer()
 
 
-@dp.message(Form.admin_assign_faction)
-async def assign_faction_nick(m: Message, state: FSMContext):
-    nick = m.text.strip()
-    user = await db.find_user_by_nick_server(nick)
-    if not user:
-        await m.answer(f"❌ Игрок с ником «{nick}» не найден в базе бота.")
-        await state.clear()
-        await admin_factions(await _fake_cb(m))
-        return
-    await state.update_data(target_user=user[0], target_nick=nick)
+@dp.callback_query(F.data.startswith("faction_assign_user:"))
+async def faction_assign_user(c: CallbackQuery):
+    if not is_admin(c.from_user.id):
+        return await c.answer("Нет доступа", show_alert=True)
+    uid = int(c.data.split(":")[1])
     rows = await db.get_factions()
     if not rows:
-        await m.answer("❌ Фракций нет. Сначала добавь их.")
-        await state.clear()
-        await admin_factions(await _fake_cb(m))
+        await c.answer("Сначала добавь фракции.", show_alert=True)
         return
-    kb = paginated_kb(rows, 0, PER_PAGE, "faction_pick:", "admin_factions")
-    await m.answer(f"Выбери фракцию для игрока «{nick}»:", reply_markup=kb)
+    kb = paginated_kb(rows, 0, PER_PAGE, f"faction_pick:{uid}:", "admin_factions",
+                      nav_prefix="fpp")
+    await safe_edit(c, f"🎯 Выбери фракцию для пользователя {uid}.\n" + SEP, kb)
+    await c.answer()
 
 
-@dp.callback_query(F.data.startswith("pg:faction_pick:"))
-async def faction_pick_page(c: CallbackQuery, state: FSMContext):
-    page = int(c.data.split(":")[2])
+@dp.callback_query(F.data.startswith("fpp:faction_pick:"))
+async def faction_pick_page(c: CallbackQuery):
+    parts = c.data.split(":")
+    uid = int(parts[2])
+    page = int(parts[3])
     rows = await db.get_factions()
-    kb = paginated_kb(rows, page, PER_PAGE, "faction_pick:", "admin_factions")
-    try:
-        await c.message.edit_reply_markup(reply_markup=kb)
-    except Exception:
-        pass
+    kb = paginated_kb(rows, page, PER_PAGE, f"faction_pick:{uid}:", "admin_factions",
+                      nav_prefix="fpp")
+    await safe_edit(c, f"🎯 Выбери фракцию для пользователя {uid}.\n" + SEP, kb)
     await c.answer()
 
 
 @dp.callback_query(F.data.startswith("faction_pick:"))
-async def faction_pick(c: CallbackQuery, state: FSMContext):
+async def faction_pick(c: CallbackQuery):
     if not is_admin(c.from_user.id):
         return await c.answer("Нет доступа", show_alert=True)
-    fid = int(c.data.split(":")[1])
+    parts = c.data.split(":")
+    uid = int(parts[1])
+    fid = int(parts[2])
     rows = await db.get_factions()
     name = next((n for i, n in rows if i == fid), None)
-    data = await state.get_data()
-    target_user = data.get("target_user")
-    target_nick = data.get("target_nick")
-    if not target_user:
-        await c.answer("Сессия истекла, начни заново.", show_alert=True)
-        return
-    await db.set_user_field(target_user, "fraction", name)
-    await state.clear()
-    await safe_edit(c, f"✅ Игроку «{target_nick}» назначена фракция «{name}».",
-                    admin_factions_kb())
+    if name is None:
+        return await c.answer("Фракция не найдена.", show_alert=True)
+    await db.set_user_field(uid, "fraction", name)
     await c.answer("Готово")
+    await show_profile(c, uid, admin_view=True)
 
 
 # --- Whitelist ---
@@ -475,17 +531,19 @@ async def admin_wl_del(c: CallbackQuery):
     if not rows:
         await c.answer("Белый список пуст.", show_alert=True)
         return
-    kb = paginated_kb(rows, 0, PER_PAGE, "wl_del:", "admin_whitelist")
+    await _render_wl_del_page(c, 0)
+
+
+async def _render_wl_del_page(c: CallbackQuery, page: int):
+    rows = await db.get_whitelist()
+    kb = paginated_kb(rows, page, PER_PAGE, "wl_del:", "admin_whitelist")
     await safe_edit(c, "👥 Выбери игрока для удаления.\n" + SEP, kb)
-    await c.answer()
 
 
 @dp.callback_query(F.data.startswith("pg:wl_del:"))
 async def wl_del_page(c: CallbackQuery):
     page = int(c.data.split(":")[2])
-    rows = await db.get_whitelist()
-    kb = paginated_kb(rows, page, PER_PAGE, "wl_del:", "admin_whitelist")
-    await safe_edit(c, "👥 Выбери игрока для удаления.\n" + SEP, kb)
+    await _render_wl_del_page(c, page)
     await c.answer()
 
 
@@ -499,8 +557,7 @@ async def wl_del(c: CallbackQuery):
     if not rows:
         await safe_edit(c, "✅ Игрок удалён.\n\nСписок пуст.", admin_whitelist_kb())
     else:
-        kb = paginated_kb(rows, 0, PER_PAGE, "wl_del:", "admin_whitelist")
-        await safe_edit(c, "✅ Игрок удалён.\n\n👥 Выбери следующего.\n" + SEP, kb)
+        await _render_wl_del_page(c, 0)
     await c.answer("Удалено")
 
 
@@ -542,17 +599,19 @@ async def admin_link_del(c: CallbackQuery):
     if not rows:
         await c.answer("Ссылок нет.", show_alert=True)
         return
-    kb = paginated_kb([(i, t) for i, t, _ in rows], 0, PER_PAGE, "link_del:", "admin_links")
+    await _render_link_del_page(c, 0)
+
+
+async def _render_link_del_page(c: CallbackQuery, page: int):
+    rows = await db.get_links()
+    kb = paginated_kb([(i, t) for i, t, _ in rows], page, PER_PAGE, "link_del:", "admin_links")
     await safe_edit(c, "🔗 Выбери ссылку для удаления.\n" + SEP, kb)
-    await c.answer()
 
 
 @dp.callback_query(F.data.startswith("pg:link_del:"))
 async def link_del_page(c: CallbackQuery):
     page = int(c.data.split(":")[2])
-    rows = await db.get_links()
-    kb = paginated_kb([(i, t) for i, t, _ in rows], page, PER_PAGE, "link_del:", "admin_links")
-    await safe_edit(c, "🔗 Выбери ссылку для удаления.\n" + SEP, kb)
+    await _render_link_del_page(c, page)
     await c.answer()
 
 
@@ -566,9 +625,29 @@ async def link_del(c: CallbackQuery):
     if not rows:
         await safe_edit(c, "✅ Ссылка удалена.\n\nСписок пуст.", admin_links_kb())
     else:
-        kb = paginated_kb([(i, t) for i, t, _ in rows], 0, PER_PAGE, "link_del:", "admin_links")
-        await safe_edit(c, "✅ Ссылка удалена.\n\n🔗 Выбери следующую.\n" + SEP, kb)
+        await _render_link_del_page(c, 0)
     await c.answer("Удалено")
+
+
+@dp.callback_query(F.data == "admin_rules_url")
+async def admin_rules_url(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c.from_user.id):
+        return await c.answer("Нет доступа", show_alert=True)
+    current = await db.get_global("rules_url", "не задана")
+    await c.message.answer(
+        f"Текущая ссылка: {current}\n\n"
+        f"Пришли новую ссылку на правила (Telegraph):"
+    )
+    await state.set_state(Form.admin_rules_url)
+    await c.answer()
+
+
+@dp.message(Form.admin_rules_url)
+async def save_rules_url(m: Message, state: FSMContext):
+    await db.set_global("rules_url", m.text.strip())
+    await state.clear()
+    await m.answer("✅ Ссылка на правила сохранена.")
+    await admin_links(await _fake_cb(m))
 
 
 # --- Карта ---
@@ -665,7 +744,6 @@ async def admin_globals(c: CallbackQuery, state: FSMContext):
     await c.message.answer(
         "Введи: ключ значение\n\n"
         "Доступные ключи:\n"
-        "rules_url — ссылка на Telegraph\n"
         "server_version — версия сервера\n"
         "server_core — ядро\n"
         "server_ip — IP-адрес\n"
@@ -688,66 +766,161 @@ async def save_global(m: Message, state: FSMContext):
     await admin_menu(await _fake_cb(m))
 
 
-# --- Написать пользователю ---
-@dp.callback_query(F.data == "admin_send")
-async def admin_send(c: CallbackQuery, state: FSMContext):
-    if not is_admin(c.from_user.id):
-        return await c.answer("Нет доступа", show_alert=True)
-    await c.message.answer(
-        "Введи в формате:\n"
-        "@username текст сообщения\n"
-        "или\n"
-        "USER_ID текст сообщения"
-    )
-    await state.set_state(Form.admin_send_user)
-    await c.answer()
-
-
-@dp.message(Form.admin_send_user)
-async def send_user(m: Message, state: FSMContext):
-    try:
-        target, text = m.text.split(maxsplit=1)
-        target = target.strip()
-        uid = None
-        if target.startswith("@") or not target.lstrip("-").isdigit():
-            uname = target.lstrip("@")
-            users = await db.get_all_users()
-            for u_id, u_name in users:
-                if u_name and u_name.lower() == uname.lower():
-                    uid = u_id
-                    break
-            if uid is None:
-                await m.answer(f"❌ Пользователь @{uname} не найден в базе.")
-                await state.clear()
-                await admin_menu(await _fake_cb(m))
-                return
-        else:
-            uid = int(target)
-        await bot.send_message(uid, f"📩 Сообщение от админа.\n{SEP}\n\n{text}")
-        await m.answer("✅ Отправлено.")
-    except Exception as e:
-        await m.answer(f"❌ Ошибка: {e}")
-    await state.clear()
-    await admin_menu(await _fake_cb(m))
-
-
-# --- Список пользователей ---
+# --- Пользователи бота ---
 @dp.callback_query(F.data == "admin_users")
 async def admin_users(c: CallbackQuery):
     if not is_admin(c.from_user.id):
         return await c.answer("Нет доступа", show_alert=True)
-    rows = await db.get_all_users()
-    if not rows:
-        text = "👥 Пользователи.\n" + SEP + "\n\nПока никого нет."
-    else:
-        lines = []
-        for u_id, u_name in rows:
-            if u_name:
-                lines.append(f"• @{u_name} ({u_id})")
-            else:
-                lines.append(f"• {u_id}")
-        text = f"👥 Пользователи ({len(rows)}).\n" + SEP + "\n\n" + "\n".join(lines)
-    await safe_edit(c, text, back_kb("admin"))
+    users = await db.get_all_users()
+    if not users:
+        await safe_edit(c, "👥 Пользователи.\n" + SEP + "\n\nПока никого нет.",
+                        back_kb("admin"))
+        await c.answer()
+        return
+    await _render_users_page(c, 0)
+
+
+async def _render_users_page(c: CallbackQuery, page: int):
+    users = await db.get_all_users()
+    kb = paginated_users_kb(users, page, "user_view:", "admin")
+    await safe_edit(c, f"👥 Пользователи ({len(users)}).\n" + SEP +
+                    "\n\nВыбери пользователя:", kb)
+
+
+@dp.callback_query(F.data.startswith("upg:user_view:"))
+async def users_page(c: CallbackQuery):
+    page = int(c.data.split(":")[2])
+    await _render_users_page(c, page)
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("user_view:"))
+async def user_view(c: CallbackQuery):
+    if not is_admin(c.from_user.id):
+        return await c.answer("Нет доступа", show_alert=True)
+    uid = int(c.data.split(":")[1])
+    await show_profile(c, uid, admin_view=True)
+    await c.answer()
+
+
+# --- Редактирование чужого профиля из админки ---
+@dp.callback_query(F.data.startswith("aedit:"))
+async def admin_edit_field(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c.from_user.id):
+        return await c.answer("Нет доступа", show_alert=True)
+    _, field, uid_str = c.data.split(":")
+    uid = int(uid_str)
+
+    if field == "fraction":
+        rows = await db.get_factions()
+        if not rows:
+            await c.answer("Сначала добавь фракции.", show_alert=True)
+            return
+        kb = paginated_kb(rows, 0, PER_PAGE, f"faction_pick:{uid}:", "admin_users",
+                          nav_prefix="fpp")
+        await safe_edit(c, f"🎯 Выбери фракцию для пользователя {uid}.\n" + SEP, kb)
+        await c.answer()
+        return
+
+    prompts = {
+        "nick_bot": "Введи новый ник в боте:",
+        "nick_server": "Введи новый ник на сервере Minecraft:",
+        "uuid": "Введи новый UUID (или пустое сообщение, чтобы удалить):",
+    }
+    await c.message.answer(prompts[field])
+    await state.update_data(target_user=uid, target_field=field)
+    await state.set_state(Form.admin_edit_user)
+    await c.answer()
+
+
+@dp.message(Form.admin_edit_user)
+async def admin_edit_user_save(m: Message, state: FSMContext):
+    data = await state.get_data()
+    uid = data.get("target_user")
+    field = data.get("target_field")
+    if uid is None or field is None:
+        await m.answer("❌ Сессия истекла.")
+        await state.clear()
+        return
+    await db.set_user_field(int(uid), field, m.text.strip())
+    await state.clear()
+    await m.answer("✅ Сохранено.")
+    await show_profile(_FakeCbForProfile(m.from_user), int(uid), admin_view=True)
+
+
+# ==================== РЕЗЕРВНОЕ КОПИРОВАНИЕ ====================
+
+@dp.message(Command("backup"))
+async def backup_cmd(m: Message):
+    if not is_admin(m.from_user.id):
+        return
+    if not os.path.exists(db.DB):
+        await m.answer("❌ Файл базы данных не найден.")
+        return
+    try:
+        await m.answer_document(
+            FSInputFile(db.DB, filename="bot.db"),
+            caption="📦 Резервная копия базы данных."
+        )
+    except Exception as e:
+        await m.answer(f"❌ Ошибка: {e}")
+
+
+@dp.message(Command("restore"))
+async def restore_cmd(m: Message):
+    if not is_admin(m.from_user.id):
+        return
+    await m.answer(
+        "📥 Пришли файл bot.db (как документ), и я восстановлю базу данных.\n"
+        "⚠️ Текущая база будет перезаписана! После восстановления перезапусти бота."
+    )
+
+
+# Ловим документ с именем bot.db от админа — восстанавливаем
+@dp.message(F.document)
+async def restore_file(m: Message):
+    if not is_admin(m.from_user.id):
+        return
+    doc = m.document
+    if not doc.file_name or doc.file_name != "bot.db":
+        return
+    try:
+        file = await bot.get_file(doc.file_id)
+        temp_path = "bot_restore_tmp.db"
+        await bot.download_file(file.file_path, temp_path)
+
+        # Проверяем, что это SQLite
+        conn = sqlite3.connect(temp_path)
+        conn.execute("SELECT name FROM sqlite_master WHERE type='table' LIMIT 1;")
+        conn.close()
+
+        # Заменяем БД
+        shutil.move(temp_path, db.DB)
+
+        await m.answer(
+            "✅ База данных восстановлена.\n\n"
+            "⚠️ Не забудь перезапустить бота (кнопка «Перезапустить» в панели BotHost), "
+            "чтобы изменения применились корректно."
+        )
+    except Exception as e:
+        await m.answer(f"❌ Ошибка восстановления: {e}")
+
+
+# Кнопка «Резервная копия» из меню создателя
+@dp.callback_query(F.data == "admin_backup")
+async def admin_backup(c: CallbackQuery):
+    if not is_admin(c.from_user.id):
+        return await c.answer("Нет доступа", show_alert=True)
+    if not os.path.exists(db.DB):
+        return await c.answer("Файл базы не найден", show_alert=True)
+    try:
+        await bot.send_document(
+            c.from_user.id,
+            FSInputFile(db.DB, filename="bot.db"),
+            caption="📦 Резервная копия базы данных."
+        )
+    except Exception as e:
+        await bot.send_message(c.from_user.id, f"❌ Ошибка: {e}")
     await c.answer()
 
 
