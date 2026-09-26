@@ -18,7 +18,8 @@ from keyboards import (
     main_kb, admin_kb, back_kb, profile_kb,
     admin_map_kb, admin_rp_kb, admin_factions_kb,
     admin_whitelist_kb, admin_links_kb, paginated_kb,
-    paginated_users_kb, user_profile_admin_kb
+    paginated_users_kb, user_profile_admin_kb, tags_menu_kb,
+    ALL_TAGS
 )
 
 logging.basicConfig(
@@ -39,20 +40,16 @@ class Form(StatesGroup):
     edit_uuid = State()
 
     admin_add_faction = State()
-    admin_assign_faction = State()
-
     admin_add_wl = State()
-
     admin_add_link = State()
     admin_rules_url = State()
-
+    admin_adminchat_url = State()
     admin_set_global = State()
-
     admin_upload_map = State()
     admin_upload_rp = State()
     admin_rp_instruction = State()
-
     admin_edit_user = State()
+    admin_send_to_user = State()
 
 
 def is_admin(uid: int) -> bool:
@@ -118,15 +115,11 @@ async def _fake_cb(m: Message):
 
 
 class _FakeCbForProfile:
-    """Псевдо-CallbackQuery для возврата в профиль после ввода."""
     def __init__(self, user):
         self.from_user = user
         self.message = self
-
     async def edit_text(self, *a, **kw):
-        # Ничего не редактируем — отправим новым сообщением через show_profile
         pass
-
     async def answer(self, *a, **kw):
         pass
 
@@ -138,23 +131,55 @@ async def show_profile(c: CallbackQuery, target_user_id: int, admin_view: bool =
                         back_kb("admin_users" if admin_view else "back_main"))
         return
 
+    tags = await db.get_user_tags(target_user_id)
+    tags_str = ", ".join(tags) if tags else "—"
+
     text = (
         f"👤 Профиль {user_label(u[0], u[1], '', u[2])}.\n" + SEP + "\n\n"
         f"Ник в боте: {u[2] or '—'}\n"
         f"Ник на сервере: {u[3] or '—'}\n"
         f"Фракция: {u[4] or '—'}\n"
-        f"UUID: {u[5] or '—'}"
+        f"UUID: {u[5] or '—'}\n"
+        f"Теги: {tags_str}"
     )
     if admin_view:
-        kb = user_profile_admin_kb(target_user_id)
+        kb = user_profile_admin_kb(target_user_id, tags)
     else:
         kb = profile_kb()
 
-    # Если c — это _FakeCbForProfile, просто отправим новое сообщение
     if isinstance(c, _FakeCbForProfile):
         await bot.send_message(target_user_id, text, reply_markup=kb)
     else:
         await safe_edit(c, text, kb)
+
+
+async def check_banned(m: Message) -> bool:
+    """Если пользователь забанен — отправляет сообщение и возвращает True."""
+    if await db.has_tag(m.from_user.id, "banned"):
+        await m.answer(
+            "🚫 Вы забанены и не можете пользоваться ботом.\n\n"
+            "(В будущем здесь появится кнопка «Заявка на разбан».)"
+        )
+        return True
+    return False
+
+
+async def check_banned_cb(c: CallbackQuery) -> bool:
+    """Для callback-кнопок. Бан не мешает нажимать /start и профиль."""
+    # Разрешаем back_main, profile и навигацию по тегам, чтобы не залипало
+    allowed = (
+        c.data == "back_main" or c.data == "profile" or c.data == "noop"
+        or c.data.startswith("tag")
+    )
+    if allowed:
+        return False
+    if await db.has_tag(c.from_user.id, "banned"):
+        await c.answer(
+            "🚫 Вы забанены и не можете пользоваться ботом.",
+            show_alert=True
+        )
+        return True
+    return False
 
 
 # ==================== /start ====================
@@ -182,6 +207,8 @@ async def noop(c: CallbackQuery):
 # ==================== 1. ФРАКЦИИ ====================
 @dp.callback_query(F.data == "factions")
 async def factions_view(c: CallbackQuery):
+    if await check_banned_cb(c):
+        return
     rows = await db.get_factions()
     if not rows:
         text = "🚩 Фракции.\n" + SEP + "\n\nПока не добавлено ни одной фракции."
@@ -195,6 +222,8 @@ async def factions_view(c: CallbackQuery):
 # ==================== 2. КАРТА ====================
 @dp.callback_query(F.data == "map")
 async def map_view(c: CallbackQuery):
+    if await check_banned_cb(c):
+        return
     file_id = await db.get_image("map")
     if not file_id:
         await safe_edit(c, "🗺 Карта.\n" + SEP + "\n\nКарта пока не загружена.", back_kb())
@@ -216,6 +245,8 @@ async def map_view(c: CallbackQuery):
 # ==================== 3. ИГРОКИ ====================
 @dp.callback_query(F.data == "players")
 async def players_view(c: CallbackQuery):
+    if await check_banned_cb(c):
+        return
     rows = await db.get_whitelist()
     if not rows:
         text = "👥 Игроки.\n" + SEP + "\n\nБелый список пуст."
@@ -229,6 +260,8 @@ async def players_view(c: CallbackQuery):
 # ==================== 4. РЕСУРСПАК ====================
 @dp.callback_query(F.data == "resourcepack")
 async def rp_view(c: CallbackQuery):
+    if await check_banned_cb(c):
+        return
     row = await db.get_resourcepack()
     if not row or not row[0]:
         await safe_edit(c, "📦 Ресурспак.\n" + SEP + "\n\nРесурспак пока не загружен.", back_kb())
@@ -251,14 +284,30 @@ async def rp_view(c: CallbackQuery):
 # ==================== 5. ССЫЛКИ ====================
 @dp.callback_query(F.data == "links")
 async def links_view(c: CallbackQuery):
+    if await check_banned_cb(c):
+        return
     rows = await db.get_links()
-    if not rows:
-        await safe_edit(c, "🔗 Ссылки.\n" + SEP + "\n\nПока не добавлено ни одной ссылки.", back_kb())
+    user_tags = await db.get_user_tags(c.from_user.id)
+    is_admin_tag = "admin" in user_tags
+
+    kb = []
+    for _, title, url in rows:
+        kb.append([InlineKeyboardButton(text=title, url=url)])
+
+    # Ссылка на чат админов — только для тех, у кого тег admin
+    if is_admin_tag:
+        admin_chat_url = await db.get_global("admin_chat_url", "")
+        if admin_chat_url:
+            kb.append([InlineKeyboardButton(text="🛡 Чат админов", url=admin_chat_url)])
+
+    kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")])
+
+    if not kb[:-1]:
+        text = "🔗 Ссылки.\n" + SEP + "\n\nПока не добавлено ни одной ссылки."
     else:
-        kb = [[InlineKeyboardButton(text=title, url=url)] for _, title, url in rows]
-        kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")])
-        await safe_edit(c, "🔗 Ссылки.\n" + SEP,
-                        InlineKeyboardMarkup(inline_keyboard=kb))
+        text = "🔗 Ссылки.\n" + SEP
+
+    await safe_edit(c, text, InlineKeyboardMarkup(inline_keyboard=kb))
     await c.answer()
 
 
@@ -271,6 +320,8 @@ async def profile_view(c: CallbackQuery):
 
 @dp.callback_query(F.data == "edit_nick_bot")
 async def edit_nick_bot(c: CallbackQuery, state: FSMContext):
+    if await check_banned_cb(c):
+        return
     await c.message.answer("Введи новый ник в боте:")
     await state.set_state(Form.edit_nick_bot)
     await c.answer()
@@ -278,6 +329,8 @@ async def edit_nick_bot(c: CallbackQuery, state: FSMContext):
 
 @dp.message(Form.edit_nick_bot)
 async def save_nick_bot(m: Message, state: FSMContext):
+    if await check_banned(m):
+        return
     await db.set_user_field(m.from_user.id, "nick_bot", m.text.strip())
     await state.clear()
     await m.answer("✅ Ник в боте обновлён.")
@@ -286,6 +339,8 @@ async def save_nick_bot(m: Message, state: FSMContext):
 
 @dp.callback_query(F.data == "edit_nick_server")
 async def edit_nick_server(c: CallbackQuery, state: FSMContext):
+    if await check_banned_cb(c):
+        return
     await c.message.answer("Введи свой ник на сервере Minecraft:")
     await state.set_state(Form.edit_nick_server)
     await c.answer()
@@ -293,6 +348,8 @@ async def edit_nick_server(c: CallbackQuery, state: FSMContext):
 
 @dp.message(Form.edit_nick_server)
 async def save_nick_server(m: Message, state: FSMContext):
+    if await check_banned(m):
+        return
     await db.set_user_field(m.from_user.id, "nick_server", m.text.strip())
     await state.clear()
     await m.answer("✅ Ник на сервере обновлён.")
@@ -301,6 +358,8 @@ async def save_nick_server(m: Message, state: FSMContext):
 
 @dp.callback_query(F.data == "edit_uuid")
 async def edit_uuid(c: CallbackQuery, state: FSMContext):
+    if await check_banned_cb(c):
+        return
     await c.message.answer("Введи свой UUID (или пустое сообщение, чтобы удалить):")
     await state.set_state(Form.edit_uuid)
     await c.answer()
@@ -308,6 +367,8 @@ async def edit_uuid(c: CallbackQuery, state: FSMContext):
 
 @dp.message(Form.edit_uuid)
 async def save_uuid(m: Message, state: FSMContext):
+    if await check_banned(m):
+        return
     await db.set_user_field(m.from_user.id, "uuid", m.text.strip())
     await state.clear()
     await m.answer("✅ UUID обновлён.")
@@ -317,6 +378,8 @@ async def save_uuid(m: Message, state: FSMContext):
 # ==================== 7. ПРАВИЛА ====================
 @dp.callback_query(F.data == "rules")
 async def rules_view(c: CallbackQuery):
+    if await check_banned_cb(c):
+        return
     url = await db.get_global("rules_url", "")
     if not url:
         await safe_edit(c, "📜 Правила.\n" + SEP + "\n\nСсылка на правила ещё не задана.", back_kb())
@@ -332,6 +395,8 @@ async def rules_view(c: CallbackQuery):
 # ==================== 8. ИНФОРМАЦИЯ ====================
 @dp.callback_query(F.data == "info")
 async def info_view(c: CallbackQuery):
+    if await check_banned_cb(c):
+        return
     version = await db.get_global("server_version", "—")
     core = await db.get_global("server_core", "—")
     ip = await db.get_global("server_ip", "скрыт (только для вайтлиста)")
@@ -353,6 +418,8 @@ async def info_view(c: CallbackQuery):
 # ==================== 9. ФОРМА ====================
 @dp.callback_query(F.data == "form")
 async def form_view(c: CallbackQuery):
+    if await check_banned_cb(c):
+        return
     await safe_edit(c, "✉️ Отправить форму.\n" + SEP + "\n\nФункция в разработке.", back_kb())
     await c.answer()
 
@@ -635,8 +702,7 @@ async def admin_rules_url(c: CallbackQuery, state: FSMContext):
         return await c.answer("Нет доступа", show_alert=True)
     current = await db.get_global("rules_url", "не задана")
     await c.message.answer(
-        f"Текущая ссылка: {current}\n\n"
-        f"Пришли новую ссылку на правила (Telegraph):"
+        f"Текущая ссылка: {current}\n\nПришли новую ссылку на правила (Telegraph):"
     )
     await state.set_state(Form.admin_rules_url)
     await c.answer()
@@ -647,6 +713,27 @@ async def save_rules_url(m: Message, state: FSMContext):
     await db.set_global("rules_url", m.text.strip())
     await state.clear()
     await m.answer("✅ Ссылка на правила сохранена.")
+    await admin_links(await _fake_cb(m))
+
+
+@dp.callback_query(F.data == "admin_adminchat_url")
+async def admin_adminchat_url(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c.from_user.id):
+        return await c.answer("Нет доступа", show_alert=True)
+    current = await db.get_global("admin_chat_url", "не задана")
+    await c.message.answer(
+        f"Текущая ссылка: {current}\n\n"
+        f"Пришли ссылку на чат админов (для тега admin):"
+    )
+    await state.set_state(Form.admin_adminchat_url)
+    await c.answer()
+
+
+@dp.message(Form.admin_adminchat_url)
+async def save_admin_chat_url(m: Message, state: FSMContext):
+    await db.set_global("admin_chat_url", m.text.strip())
+    await state.clear()
+    await m.answer("✅ Ссылка на чат админов сохранена.")
     await admin_links(await _fake_cb(m))
 
 
@@ -803,7 +890,7 @@ async def user_view(c: CallbackQuery):
     await c.answer()
 
 
-# --- Редактирование чужого профиля из админки ---
+# --- Редактирование чужого профиля ---
 @dp.callback_query(F.data.startswith("aedit:"))
 async def admin_edit_field(c: CallbackQuery, state: FSMContext):
     if not is_admin(c.from_user.id):
@@ -848,6 +935,64 @@ async def admin_edit_user_save(m: Message, state: FSMContext):
     await show_profile(_FakeCbForProfile(m.from_user), int(uid), admin_view=True)
 
 
+# --- Теги пользователя ---
+@dp.callback_query(F.data.startswith("tags_menu:"))
+async def tags_menu(c: CallbackQuery):
+    if not is_admin(c.from_user.id):
+        return await c.answer("Нет доступа", show_alert=True)
+    uid = int(c.data.split(":")[1])
+    current = await db.get_user_tags(uid)
+    kb = tags_menu_kb(uid, current)
+    text = f"🏷 Теги пользователя {uid}.\n" + SEP + "\n\nНажми на тег, чтобы добавить/убрать:"
+    await safe_edit(c, text, kb)
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("tag_toggle:"))
+async def tag_toggle(c: CallbackQuery):
+    if not is_admin(c.from_user.id):
+        return await c.answer("Нет доступа", show_alert=True)
+    _, uid_str, tag = c.data.split(":")
+    uid = int(uid_str)
+    if tag not in ALL_TAGS:
+        return await c.answer("Неизвестный тег", show_alert=True)
+    added = await db.toggle_user_tag(uid, tag)
+    current = await db.get_user_tags(uid)
+    kb = tags_menu_kb(uid, current)
+    text = f"🏷 Теги пользователя {uid}.\n" + SEP + "\n\nНажми на тег, чтобы добавить/убрать:"
+    await safe_edit(c, text, kb)
+    await c.answer(f"Тег {'добавлен' if added else 'убран'}")
+
+
+# --- Сообщение пользователю ---
+@dp.callback_query(F.data.startswith("msg_user:"))
+async def msg_user(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c.from_user.id):
+        return await c.answer("Нет доступа", show_alert=True)
+    uid = int(c.data.split(":")[1])
+    await c.message.answer("Введи текст сообщения для пользователя:")
+    await state.update_data(target_user=uid)
+    await state.set_state(Form.admin_send_to_user)
+    await c.answer()
+
+
+@dp.message(Form.admin_send_to_user)
+async def send_to_user(m: Message, state: FSMContext):
+    data = await state.get_data()
+    uid = data.get("target_user")
+    if uid is None:
+        await m.answer("❌ Сессия истекла.")
+        await state.clear()
+        return
+    try:
+        await bot.send_message(int(uid), f"📩 Сообщение от админа.\n{SEP}\n\n{m.text}")
+        await m.answer("✅ Отправлено.")
+    except Exception as e:
+        await m.answer(f"❌ Ошибка: {e}")
+    await state.clear()
+    await show_profile(_FakeCbForProfile(m.from_user), int(uid), admin_view=True)
+
+
 # ==================== РЕЗЕРВНОЕ КОПИРОВАНИЕ ====================
 
 @dp.message(Command("backup"))
@@ -876,7 +1021,6 @@ async def restore_cmd(m: Message):
     )
 
 
-# Ловим документ с именем bot.db от админа — восстанавливаем
 @dp.message(F.document)
 async def restore_file(m: Message):
     if not is_admin(m.from_user.id):
@@ -889,24 +1033,20 @@ async def restore_file(m: Message):
         temp_path = "bot_restore_tmp.db"
         await bot.download_file(file.file_path, temp_path)
 
-        # Проверяем, что это SQLite
         conn = sqlite3.connect(temp_path)
         conn.execute("SELECT name FROM sqlite_master WHERE type='table' LIMIT 1;")
         conn.close()
 
-        # Заменяем БД
         shutil.move(temp_path, db.DB)
 
         await m.answer(
             "✅ База данных восстановлена.\n\n"
-            "⚠️ Не забудь перезапустить бота (кнопка «Перезапустить» в панели BotHost), "
-            "чтобы изменения применились корректно."
+            "⚠️ Не забудь перезапустить бота, чтобы изменения применились."
         )
     except Exception as e:
         await m.answer(f"❌ Ошибка восстановления: {e}")
 
 
-# Кнопка «Резервная копия» из меню создателя
 @dp.callback_query(F.data == "admin_backup")
 async def admin_backup(c: CallbackQuery):
     if not is_admin(c.from_user.id):
