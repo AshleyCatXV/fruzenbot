@@ -133,6 +133,9 @@ def paginated_kb(items, page: int, per_page: int, prefix: str, back_target: str,
     end = start + per_page
     page_items = items[start:end]
 
+    # Убираем двоеточие в конце prefix для навигации
+    base = prefix.rstrip(":")
+
     kb = []
     for item_id, name in page_items:
         label = name if len(name) <= 40 else name[:37] + "..."
@@ -140,11 +143,11 @@ def paginated_kb(items, page: int, per_page: int, prefix: str, back_target: str,
 
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"{nav_prefix}:{prefix}:{page-1}"))
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"{nav_prefix}:{base}:{page-1}"))
     if total_pages > 1:
         nav.append(InlineKeyboardButton(text=f"{page+1}/{total_pages}", callback_data="noop"))
     if page < total_pages - 1:
-        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"{nav_prefix}:{prefix}:{page+1}"))
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"{nav_prefix}:{base}:{page+1}"))
     if nav:
         kb.append(nav)
 
