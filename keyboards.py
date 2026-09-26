@@ -1,5 +1,8 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+PER_PAGE = 8
+
+
 def main_kb(is_admin: bool):
     kb = [
         [InlineKeyboardButton(text="🚩 Фракции", callback_data="factions"),
@@ -31,8 +34,8 @@ def admin_kb():
         [InlineKeyboardButton(text="🗺 Управление картой", callback_data="admin_map")],
         [InlineKeyboardButton(text="📦 Управление ресурспаком", callback_data="admin_rp")],
         [InlineKeyboardButton(text="🌍 Глобальные переменные", callback_data="admin_globals")],
-        [InlineKeyboardButton(text="📢 Написать пользователю", callback_data="admin_send")],
-        [InlineKeyboardButton(text="👥 Список пользователей", callback_data="admin_users")],
+        [InlineKeyboardButton(text="👥 Пользователи бота", callback_data="admin_users")],
+        [InlineKeyboardButton(text="💾 Резервная копия", callback_data="admin_backup")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")],
     ])
 
@@ -85,14 +88,31 @@ def admin_links_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить ссылку", callback_data="admin_link_add")],
         [InlineKeyboardButton(text="➖ Удалить ссылку", callback_data="admin_link_del")],
+        [InlineKeyboardButton(text="⚙️ Задать ссылку на правила", callback_data="admin_rules_url")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin")],
     ])
 
 
-def paginated_kb(items, page: int, per_page: int, prefix: str, back_target: str):
+def user_profile_admin_kb(target_user_id: int):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Ник в боте",
+                              callback_data=f"aedit:nick_bot:{target_user_id}")],
+        [InlineKeyboardButton(text="🎮 Ник на сервере",
+                              callback_data=f"aedit:nick_server:{target_user_id}")],
+        [InlineKeyboardButton(text="🎯 Фракция",
+                              callback_data=f"aedit:fraction:{target_user_id}")],
+        [InlineKeyboardButton(text="🆔 UUID",
+                              callback_data=f"aedit:uuid:{target_user_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_users")],
+    ])
+
+
+def paginated_kb(items, page: int, per_page: int, prefix: str, back_target: str,
+                 nav_prefix: str = "pg"):
     """
     items: список кортежей (id, name)
-    prefix: строка, к которой приклеивается id в callback_data, например "faction_del:"
+    prefix: префикс callback_data кнопки элемента (например "faction_del:")
+    nav_prefix: префикс для навигации (например "pg")
     """
     total_pages = max(1, (len(items) + per_page - 1) // per_page)
     page = max(0, min(page, total_pages - 1))
@@ -102,17 +122,36 @@ def paginated_kb(items, page: int, per_page: int, prefix: str, back_target: str)
 
     kb = []
     for item_id, name in page_items:
-        kb.append([InlineKeyboardButton(text=name, callback_data=f"{prefix}{item_id}")])
+        label = name if len(name) <= 40 else name[:37] + "..."
+        kb.append([InlineKeyboardButton(text=label, callback_data=f"{prefix}{item_id}")])
 
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"pg:{prefix}:{page-1}"))
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"{nav_prefix}:{prefix}:{page-1}"))
     if total_pages > 1:
         nav.append(InlineKeyboardButton(text=f"{page+1}/{total_pages}", callback_data="noop"))
     if page < total_pages - 1:
-        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"pg:{prefix}:{page+1}"))
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"{nav_prefix}:{prefix}:{page+1}"))
     if nav:
         kb.append(nav)
 
     kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_target)])
     return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def paginated_users_kb(users, page: int, prefix: str, back_target: str,
+                       per_page: int = PER_PAGE):
+    """
+    users: список (user_id, username, first_name)
+    prefix: префикс callback_data (например "user_view:")
+    """
+    items = []
+    for u_id, u_name, u_first in users:
+        if u_name:
+            label = f"@{u_name} ({u_id})"
+        elif u_first:
+            label = f"{u_first} ({u_id})"
+        else:
+            label = str(u_id)
+        items.append((u_id, label))
+    return paginated_kb(items, page, per_page, prefix, back_target, nav_prefix="upg")
