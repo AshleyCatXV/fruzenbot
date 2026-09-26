@@ -2,6 +2,8 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 PER_PAGE = 8
 
+ALL_TAGS = ["banned", "whitelisted", "processing", "admin"]
+
 
 def main_kb(is_admin: bool):
     kb = [
@@ -89,12 +91,17 @@ def admin_links_kb():
         [InlineKeyboardButton(text="➕ Добавить ссылку", callback_data="admin_link_add")],
         [InlineKeyboardButton(text="➖ Удалить ссылку", callback_data="admin_link_del")],
         [InlineKeyboardButton(text="⚙️ Задать ссылку на правила", callback_data="admin_rules_url")],
+        [InlineKeyboardButton(text="🛡 Задать ссылку на чат админов", callback_data="admin_adminchat_url")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin")],
     ])
 
 
-def user_profile_admin_kb(target_user_id: int):
-    return InlineKeyboardMarkup(inline_keyboard=[
+def user_profile_admin_kb(target_user_id: int, tags: list = None):
+    tags = tags or []
+    kb = [
+        [InlineKeyboardButton(text="🏷 Теги", callback_data=f"tags_menu:{target_user_id}")],
+        [InlineKeyboardButton(text="✉️ Сообщение пользователю",
+                              callback_data=f"msg_user:{target_user_id}")],
         [InlineKeyboardButton(text="✏️ Ник в боте",
                               callback_data=f"aedit:nick_bot:{target_user_id}")],
         [InlineKeyboardButton(text="🎮 Ник на сервере",
@@ -104,16 +111,22 @@ def user_profile_admin_kb(target_user_id: int):
         [InlineKeyboardButton(text="🆔 UUID",
                               callback_data=f"aedit:uuid:{target_user_id}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_users")],
-    ])
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def tags_menu_kb(target_user_id: int, current_tags: list):
+    kb = []
+    for tag in ALL_TAGS:
+        mark = "✅" if tag in current_tags else "⬜"
+        kb.append([InlineKeyboardButton(text=f"{mark} {tag}",
+                                        callback_data=f"tag_toggle:{target_user_id}:{tag}")])
+    kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"user_view:{target_user_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
 def paginated_kb(items, page: int, per_page: int, prefix: str, back_target: str,
                  nav_prefix: str = "pg"):
-    """
-    items: список кортежей (id, name)
-    prefix: префикс callback_data кнопки элемента (например "faction_del:")
-    nav_prefix: префикс для навигации (например "pg")
-    """
     total_pages = max(1, (len(items) + per_page - 1) // per_page)
     page = max(0, min(page, total_pages - 1))
     start = page * per_page
@@ -141,10 +154,6 @@ def paginated_kb(items, page: int, per_page: int, prefix: str, back_target: str,
 
 def paginated_users_kb(users, page: int, prefix: str, back_target: str,
                        per_page: int = PER_PAGE):
-    """
-    users: список (user_id, username, first_name)
-    prefix: префикс callback_data (например "user_view:")
-    """
     items = []
     for u_id, u_name, u_first in users:
         if u_name:
