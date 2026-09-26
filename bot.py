@@ -154,7 +154,6 @@ async def show_profile(c: CallbackQuery, target_user_id: int, admin_view: bool =
 
 
 async def check_banned(m: Message) -> bool:
-    """Если пользователь забанен — отправляет сообщение и возвращает True."""
     if await db.has_tag(m.from_user.id, "banned"):
         await m.answer(
             "🚫 Вы забанены и не можете пользоваться ботом.\n\n"
@@ -165,8 +164,6 @@ async def check_banned(m: Message) -> bool:
 
 
 async def check_banned_cb(c: CallbackQuery) -> bool:
-    """Для callback-кнопок. Бан не мешает нажимать /start и профиль."""
-    # Разрешаем back_main, profile и навигацию по тегам, чтобы не залипало
     allowed = (
         c.data == "back_main" or c.data == "profile" or c.data == "noop"
         or c.data.startswith("tag")
@@ -294,7 +291,6 @@ async def links_view(c: CallbackQuery):
     for _, title, url in rows:
         kb.append([InlineKeyboardButton(text=title, url=url)])
 
-    # Ссылка на чат админов — только для тех, у кого тег admin
     if is_admin_tag:
         admin_chat_url = await db.get_global("admin_chat_url", "")
         if admin_chat_url:
