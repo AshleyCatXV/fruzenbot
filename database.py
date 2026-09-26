@@ -12,7 +12,8 @@ async def init_db():
                 nick_bot TEXT DEFAULT '',
                 nick_server TEXT DEFAULT '',
                 fraction TEXT DEFAULT '',
-                uuid TEXT DEFAULT ''
+                uuid TEXT DEFAULT '',
+                tags TEXT DEFAULT ''
             )
         """)
         await db.execute("""
@@ -55,16 +56,16 @@ async def init_db():
         """)
         await db.commit()
 
-        # --- МИГРАЦИИ: добавляем колонки, если их ещё нет ---
+        # Миграции
         await _ensure_column(db, "users", "first_name", "TEXT DEFAULT ''")
         await _ensure_column(db, "users", "nick_bot", "TEXT DEFAULT ''")
         await _ensure_column(db, "users", "nick_server", "TEXT DEFAULT ''")
         await _ensure_column(db, "users", "fraction", "TEXT DEFAULT ''")
         await _ensure_column(db, "users", "uuid", "TEXT DEFAULT ''")
+        await _ensure_column(db, "users", "tags", "TEXT DEFAULT ''")
 
 
 async def _ensure_column(db, table: str, column: str, coltype: str):
-    """Если колонки нет — добавляет её. Если есть — ничего не делает."""
     async with db.execute(f"PRAGMA table_info({table})") as cur:
         cols = [row[1] for row in await cur.fetchall()]
     if column not in cols:
@@ -76,7 +77,7 @@ async def _ensure_column(db, table: str, column: str, coltype: str):
 async def get_user(user_id: int):
     async with aiosqlite.connect(DB) as db:
         async with db.execute(
-            "SELECT user_id, username, nick_bot, nick_server, fraction, uuid "
+            "SELECT user_id, username, nick_bot, nick_server, fraction, uuid, tags "
             "FROM users WHERE user_id=?", (user_id,)
         ) as cur:
             return await cur.fetchone()
@@ -99,7 +100,7 @@ async def add_user(user_id: int, username: str, first_name: str = ""):
         await db.commit()
 
 async def set_user_field(user_id: int, field: str, value: str):
-    allowed = {"nick_bot", "nick_server", "fraction", "uuid"}
+    allowed = {"nick_bot", "nick_server", "fraction", "uuid", "tags"}
     if field not in allowed:
         raise ValueError("Недопустимое поле")
     async with aiosqlite.connect(DB) as db:
@@ -118,6 +119,36 @@ async def find_user_by_nick_server(nick: str):
             (nick,)
         ) as cur:
             return await cur.fetchone()
+
+# ---------- Теги ----------
+def parse_tags(tags_str: str) -> list:
+    if not tags_str:
+        return []
+    return [t.strip() for t in tags_str.split(",") if t.strip()]
+
+async def get_user_tags(user_id: int) -> list:
+    u = await get_user(user_id)
+    if not u:
+        return []
+    return parse_tags(u[6])
+
+async def toggle_user_tag(user_id: int, tag: str):
+    """Добавляет тег, если его нет; удаляет, если есть. Возвращает True если добавлен."""
+    u = await get_user(user_id)
+    if not u:
+        return False
+    tags = parse_tags(u[6])
+    if tag in tags:
+        tags.remove(tag)
+        added = False
+    else:
+        tags.append(tag)
+        added = True
+    await set_user_field(user_id, "tags", ",".join(tags))
+    return added
+
+async def has_tag(user_id: int, tag: str) -> bool:
+    return tag in await get_user_tags(user_id)
 
 # ---------- Глобальные ----------
 async def set_global(key: str, value: str):
