@@ -8,6 +8,7 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 username TEXT,
+                first_name TEXT DEFAULT '',
                 nick_bot TEXT DEFAULT '',
                 nick_server TEXT DEFAULT '',
                 fraction TEXT DEFAULT '',
@@ -54,6 +55,23 @@ async def init_db():
         """)
         await db.commit()
 
+        # --- МИГРАЦИИ: добавляем колонки, если их ещё нет ---
+        await _ensure_column(db, "users", "first_name", "TEXT DEFAULT ''")
+        await _ensure_column(db, "users", "nick_bot", "TEXT DEFAULT ''")
+        await _ensure_column(db, "users", "nick_server", "TEXT DEFAULT ''")
+        await _ensure_column(db, "users", "fraction", "TEXT DEFAULT ''")
+        await _ensure_column(db, "users", "uuid", "TEXT DEFAULT ''")
+
+
+async def _ensure_column(db, table: str, column: str, coltype: str):
+    """Если колонки нет — добавляет её. Если есть — ничего не делает."""
+    async with db.execute(f"PRAGMA table_info({table})") as cur:
+        cols = [row[1] for row in await cur.fetchall()]
+    if column not in cols:
+        await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+        await db.commit()
+
+
 # ---------- Пользователи ----------
 async def get_user(user_id: int):
     async with aiosqlite.connect(DB) as db:
@@ -63,12 +81,21 @@ async def get_user(user_id: int):
         ) as cur:
             return await cur.fetchone()
 
-async def add_user(user_id: int, username: str):
+async def add_user(user_id: int, username: str, first_name: str = ""):
     async with aiosqlite.connect(DB) as db:
-        await db.execute(
-            "INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)",
-            (user_id, username)
-        )
+        async with db.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,)) as cur:
+            exists = await cur.fetchone()
+        if not exists:
+            await db.execute(
+                "INSERT INTO users (user_id, username, first_name, nick_bot) "
+                "VALUES (?, ?, ?, ?)",
+                (user_id, username or "", first_name or "", first_name or "")
+            )
+        else:
+            await db.execute(
+                "UPDATE users SET username=? WHERE user_id=?",
+                (username or "", user_id)
+            )
         await db.commit()
 
 async def set_user_field(user_id: int, field: str, value: str):
@@ -81,7 +108,7 @@ async def set_user_field(user_id: int, field: str, value: str):
 
 async def get_all_users():
     async with aiosqlite.connect(DB) as db:
-        async with db.execute("SELECT user_id, username FROM users ORDER BY user_id") as cur:
+        async with db.execute("SELECT user_id, username, first_name FROM users ORDER BY user_id") as cur:
             return await cur.fetchall()
 
 async def find_user_by_nick_server(nick: str):
