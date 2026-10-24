@@ -28,9 +28,8 @@ dp = Dispatcher()
 SEP = "—" * 10
 PER_PAGE = 8
 
-# Хранилище кулдаунов для форм (в памяти)
-FORM_COOLDOWNS = {}  # {user_id: timestamp}
-FORM_COOLDOWN_TIME = 1800  # 30 минут в секундах
+FORM_COOLDOWNS = {}
+FORM_COOLDOWN_TIME = 1800 
 
 def is_admin(uid): return uid == ADMIN_ID
 def user_label(uid, uname, fname=""):
@@ -288,7 +287,7 @@ async def info_view(c: CallbackQuery):
         except Exception:
             status_text = "🔴 Офлайн"
     
-    text = f"ℹ️ Информация.\n{SEP}\n\nВерсия: {await db.get_global('server_version', '—')}\nЯдро: {await db.get_global('server_core', '—')}\nСезон: {await db.get_global('server_season', '—')}\nIP: {server_ip or 'скрыт'}\nСтатус: {status_text}\n\nПолезные статьи:\n{await db.get_global('server_articles', '—')}"
+    text = f"ℹ️ Информация.\n{SEP}\n\nВерсия: {await db.get_global('server_version', '—')}\nЯдро: {await db.get_global('server_core', '—')}\nСезон: {await db.get_global('server_season', '—')}\nIP: {server_ip}:{server_port}\nСтатус: {status_text}\n\nПолезные статьи:\n{await db.get_global('server_articles', '—')}"
     await safe_edit(c, text, back_kb())
     await c.answer()
 
@@ -347,7 +346,6 @@ async def form_text(m: Message, state: FSMContext):
     form_type = data.get("form_type")
     text = m.text.strip()
     
-    # Обновляем кулдаун
     FORM_COOLDOWNS[m.from_user.id] = time.time()
     
     user = await db.get_user(m.from_user.id)
@@ -481,7 +479,6 @@ async def admin_menu(c: CallbackQuery):
     await safe_edit(c, "🛠 Меню создателя.\n" + SEP, admin_kb())
     await c.answer()
 
-# --- Пользователи (добавление нового) ---
 @dp.callback_query(F.data == "admin_users")
 async def admin_users(c: CallbackQuery):
     if not is_admin(c.from_user.id): return
@@ -634,6 +631,48 @@ async def faction_del(c: CallbackQuery):
     else: await _render_faction_del_page(c, 0)
     await c.answer("Удалено")
 
+# --- Назначение главы ---
+@dp.callback_query(F.data == "admin_faction_leader")
+async def admin_faction_leader(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return
+    rows = await db.get_factions()
+    if not rows: return await c.answer("Фракций нет.", show_alert=True)
+    kb = paginated_kb([(r[0], r[1]) for r in rows], 0, PER_PAGE, "f_leader_pick:", "admin_factions", nav_prefix="flp")
+    await safe_edit(c, "👑 Выбери фракцию, чтобы назначить главу.\n" + SEP, kb)
+    await c.answer()
+
+@dp.callback_query(F.data.startswith("flp:f_leader_pick:"))
+async def f_leader_page(c: CallbackQuery):
+    page = int(c.data.split(":")[2])
+    rows = await db.get_factions()
+    kb = paginated_kb([(r[0], r[1]) for r in rows], page, PER_PAGE, "f_leader_pick:", "admin_factions", nav_prefix="flp")
+    await safe_edit(c, "👑 Выбери фракцию, чтобы назначить главу.\n" + SEP, kb)
+    await c.answer()
+
+@dp.callback_query(F.data.startswith("f_leader_pick:"))
+async def f_leader_pick(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return
+    fid = int(c.data.split(":")[1])
+    users = await db.get_all_users()
+    kb = paginated_users_kb(users, 0, f"f_leader_set:{fid}:", "admin_factions", per_page=PER_PAGE)
+    await safe_edit(c, "👑 Выбери игрока, который станет главой.\n" + SEP, kb)
+    await c.answer()
+
+@dp.callback_query(F.data.startswith("f_leader_set:"))
+async def f_leader_set(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return
+    parts = c.data.split(":")
+    fid = int(parts[1])
+    uid = int(parts[2])
+    
+    rows = await db.get_factions()
+    f = next((r for r in rows if r[0] == fid), None)
+    if not f: return await c.answer("Фракция не найдена.", show_alert=True)
+    
+    await db.set_faction_leader(f[1], uid)
+    await c.answer("✅ Глава назначен.")
+    await admin_faction_leader(c)
+
 @dp.callback_query(F.data.startswith("fpp:faction_pick:"))
 async def faction_pick_page(c: CallbackQuery):
     parts = c.data.split(":")
@@ -655,7 +694,6 @@ async def faction_pick(c: CallbackQuery):
     await c.answer("Готово")
     await show_profile(c, uid, admin_view=True)
 
-# --- Управление белым списком ---
 @dp.callback_query(F.data == "admin_whitelist")
 async def admin_whitelist(c: CallbackQuery):
     if not is_admin(c.from_user.id): return
@@ -702,7 +740,6 @@ async def wl_del(c: CallbackQuery):
     else: await _render_wl_del_page(c, 0)
     await c.answer("Удалено")
 
-# --- Ссылки ---
 @dp.callback_query(F.data == "admin_links")
 async def admin_links(c: CallbackQuery):
     if not is_admin(c.from_user.id): return
