@@ -992,21 +992,6 @@ async def restore_cmd(m: Message):
     if not is_admin(m.from_user.id): return
     await m.answer("📥 Пришли файл bot.db (как документ).\n⚠️ Текущая БД будет перезаписана!")
 
-@dp.message(F.document)
-async def restore_file(m: Message):
-    if not is_admin(m.from_user.id) or not m.document.file_name.endswith(".db"): return
-    if m.document.file_name != "bot.db": return
-    try:
-        file = await bot.get_file(m.document.file_id)
-        temp_path = "bot_restore_tmp.db"
-        await bot.download_file(file.file_path, temp_path)
-        conn = sqlite3.connect(temp_path)
-        conn.execute("SELECT name FROM sqlite_master WHERE type='table' LIMIT 1;")
-        conn.close()
-        shutil.move(temp_path, db.DB)
-        await m.answer("✅ БД восстановлена. Перезапусти бота.")
-    except Exception as e: await m.answer(f"❌ Ошибка: {e}")
-
 @dp.callback_query(F.data == "admin_backup")
 async def admin_backup(c: CallbackQuery):
     if not is_admin(c.from_user.id): return
@@ -1067,25 +1052,46 @@ async def upload_whitelist_cmd(m: Message):
     if not is_admin(m.from_user.id): return
     await m.answer("📥 Пришли файл `whitelist.json` (как документ).")
 
+# ОБЪЕДИНЕННЫЙ ОБРАБОТЧИК ДОКУМЕНТОВ
 @dp.message(F.document)
-async def handle_whitelist_file(m: Message):
+async def handle_documents(m: Message):
     if not is_admin(m.from_user.id): return
-    if not m.document.file_name or m.document.file_name != "whitelist.json": return
-    try:
-        file = await bot.get_file(m.document.file_id)
-        # Скачиваем файл в память (байты) и декодируем как текст
-        file_bytes = await bot.download_file(file.file_path)
-        text = file_bytes.read().decode("utf-8")
-        
-        # Проверяем, что это валидный JSON
-        json.loads(text)
-        
-        # Сохраняем в базу
-        await db.set_whitelist_json(text)
-        
-        await m.answer("✅ Файл `whitelist.json` сохранён в базу. Теперь можешь выполнить `/syncwhitelist`.")
-    except Exception as e:
-        await m.answer(f"❌ Ошибка: {e}")
+    
+    doc = m.document
+    if not doc.file_name: return
+
+    # --- 1. Обработка восстановления БД (bot.db) ---
+    if doc.file_name == "bot.db":
+        try:
+            file = await bot.get_file(doc.file_id)
+            temp_path = "bot_restore_tmp.db"
+            await bot.download_file(file.file_path, temp_path)
+            conn = sqlite3.connect(temp_path)
+            conn.execute("SELECT name FROM sqlite_master WHERE type='table' LIMIT 1;")
+            conn.close()
+            shutil.move(temp_path, db.DB)
+            await m.answer("✅ БД восстановлена. Перезапусти бота.")
+        except Exception as e: 
+            await m.answer(f"❌ Ошибка восстановления БД: {e}")
+        return
+
+    # --- 2. Обработка whitelist.json ---
+    if doc.file_name == "whitelist.json":
+        try:
+            file = await bot.get_file(doc.file_id)
+            file_bytes = await bot.download_file(file.file_path)
+            text = file_bytes.read().decode("utf-8")
+            
+            # Проверяем, что это валидный JSON
+            json.loads(text)
+            
+            # Сохраняем в базу
+            await db.set_whitelist_json(text)
+            
+            await m.answer("✅ Файл `whitelist.json` сохранён в базу. Теперь можешь выполнить `/syncwhitelist`.")
+        except Exception as e:
+            await m.answer(f"❌ Ошибка обработки файла: {e}")
+        return
 
 # ==================== ЗАПУСК ====================
 async def main():
