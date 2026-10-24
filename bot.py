@@ -10,10 +10,9 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 from aiogram.fsm.context import FSMContext
-from mcstatus import JavaServer
 
 import database as db
-from config import BOT_TOKEN, ADMIN_ID
+from config import BOT_TOKEN, ADMIN_ID, ADMIN_CHAT_ID
 from keyboards import (
     main_kb, admin_kb, back_kb, profile_kb, admin_map_kb, admin_rp_kb, admin_factions_kb,
     admin_whitelist_kb, admin_links_kb, paginated_kb, paginated_users_kb, user_profile_admin_kb,
@@ -223,8 +222,9 @@ async def intro_submit(c: CallbackQuery, state: FSMContext):
     if data.get("intro_frac_join"): msg += f"Хочет присоединиться к: {data.get('intro_frac_join')}"
     elif data.get("intro_frac_create"): msg += f"Хочет создать: {data.get('intro_frac_create')}"
     
-    await bot.send_message(ADMIN_ID, msg, reply_markup=intro_review_kb(c.from_user.id))
-    if data.get("intro_flag"): await bot.send_photo(ADMIN_ID, data.get("intro_flag"), caption="Флаг новой фракции")
+    # Отправляем в группу
+    await bot.send_message(ADMIN_CHAT_ID, msg, reply_markup=intro_review_kb(c.from_user.id))
+    if data.get("intro_flag"): await bot.send_photo(ADMIN_CHAT_ID, data.get("intro_flag"), caption="Флаг новой фракции")
 
     await safe_edit(c, "✅ Анкета отправлена на рассмотрение администрации. Ожидайте ответа!")
     await c.answer()
@@ -277,28 +277,48 @@ async def info_view(c: CallbackQuery):
     
     server_ip = await db.get_global("server_ip", "")
     server_port = await db.get_global("server_port", "25565")
-    status_text = "🔴 Офлайн"
     
-    if server_ip:
-        # Пытаемся подключиться напрямую по IP и порту (для нестандартных портов)
-        try:
-            port = int(server_port) if server_port else 25565
-            server = JavaServer(server_ip, port)
-            status = await server.async_status()
-            status_text = f"🟢 Онлайн ({status.players.online}/{status.players.max})"
-        except Exception as e:
-            # Если не вышло, пробуем через lookup (на случай SRV-записей)
-            try:
-                server = await JavaServer.async_lookup(f"{server_ip}:{server_port}")
-                status = await server.async_status()
-                status_text = f"🟢 Онлайн ({status.players.online}/{status.players.max})"
-            except Exception as e2:
-                logging.error(f"Ошибка статуса: {e} | {e2}")
-                status_text = "🔴 Офлайн (ошибка подключения)"
+    status_val = await db.get_global("server_status_manual", "offline")
+    if status_val == "online":
+        status_text = "🟢 Онлайн"
+    else:
+        status_text = "🔴 Офлайн"
     
     text = f"ℹ️ Информация.\n{SEP}\n\nВерсия: {await db.get_global('server_version', '—')}\nЯдро: {await db.get_global('server_core', '—')}\nСезон: {await db.get_global('server_season', '—')}\nIP: {server_ip}:{server_port}\nСтатус: {status_text}\n\nПолезные статьи:\n{await db.get_global('server_articles', '—')}"
-    await safe_edit(c, text, back_kb())
+    
+    kb_list = [[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")]]
+    if is_admin(c.from_user.id):
+        kb_list.insert(0, [InlineKeyboardButton(text="⚙️ Изменить статус", callback_data="admin_set_status")])
+        
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_list)
+    await safe_edit(c, text, kb)
     await c.answer()
+
+@dp.callback_query(F.data == "admin_set_status")
+async def admin_set_status(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return await c.answer("Нет доступа", show_alert=True)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🟢 Онлайн", callback_data="set_status_online")],
+        [InlineKeyboardButton(text="🔴 Офлайн", callback_data="set_status_offline")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="info")]
+    ])
+    await safe_edit(c, "⚙️ Выбери новый статус сервера:", kb)
+    await c.answer()
+
+@dp.callback_query(F.data == "set_status_online")
+async def set_status_online(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return
+    await db.set_global("server_status_manual", "online")
+    await c.answer("✅ Статус изменен на Онлайн")
+    await info_view(c)
+
+@dp.callback_query(F.data == "set_status_offline")
+async def set_status_offline(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return
+    await db.set_global("server_status_manual", "offline")
+    await c.answer("✅ Статус изменен на Офлайн")
+    await info_view(c)
 
 @dp.callback_query(F.data == "rules")
 async def rules_view(c: CallbackQuery):
@@ -393,7 +413,8 @@ async def form_text(m: Message, state: FSMContext):
     
     msg = f"{types.get(form_type, '📩 ОБРАЩЕНИЕ')}\n{SEP}\nОт: {user_info}\n\n{text}"
     try:
-        await bot.send_message(ADMIN_ID, msg)
+        # Отправляем в группу
+        await bot.send_message(ADMIN_CHAT_ID, msg)
         await m.answer("✅ Ваше обращение отправлено администрации.")
     except Exception as e:
         await m.answer(f"❌ Ошибка при отправке: {e}")
@@ -1091,10 +1112,7 @@ async def handle_documents(m: Message):
             file_bytes = await bot.download_file(file.file_path)
             text = file_bytes.read().decode("utf-8")
             
-            # Проверяем, что это валидный JSON
             json.loads(text)
-            
-            # Сохраняем в базу
             await db.set_whitelist_json(text)
             
             await m.answer("✅ Файл `whitelist.json` сохранён в базу. Теперь можешь выполнить `/syncwhitelist`.")
