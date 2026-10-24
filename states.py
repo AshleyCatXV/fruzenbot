@@ -4,6 +4,7 @@ class Form(StatesGroup):
     edit_nick_bot = State()
     
     admin_add_faction = State()
+    admin_faction_leader_set = State()  # Новое состояние для ввода ника главы
     admin_add_wl = State()
     admin_add_link = State()
     admin_rules_url = State()
