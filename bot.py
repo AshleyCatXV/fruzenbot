@@ -4,17 +4,21 @@ import os
 import shutil
 import sqlite3
 import aiosqlite
+import json
+import time
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 from aiogram.fsm.context import FSMContext
+from mcstatus import JavaServer
 
 import database as db
 from config import BOT_TOKEN, ADMIN_ID
 from keyboards import (
     main_kb, admin_kb, back_kb, profile_kb, admin_map_kb, admin_rp_kb, admin_factions_kb,
     admin_whitelist_kb, admin_links_kb, paginated_kb, paginated_users_kb, user_profile_admin_kb,
-    tags_menu_kb, intro_start_kb, intro_activity_kb, intro_faction_kb, intro_finish_kb, intro_review_kb
+    tags_menu_kb, intro_start_kb, intro_activity_kb, intro_faction_kb, intro_finish_kb, intro_review_kb,
+    form_menu_kb
 )
 from states import Form
 
@@ -24,6 +28,10 @@ dp = Dispatcher()
 SEP = "—" * 10
 PER_PAGE = 8
 
+# Хранилище кулдаунов для форм (в памяти)
+FORM_COOLDOWNS = {}  # {user_id: timestamp}
+FORM_COOLDOWN_TIME = 1800  # 30 минут в секундах
+
 def is_admin(uid): return uid == ADMIN_ID
 def user_label(uid, uname, fname=""):
     if uname: return f"@{uname} ({uid})"
@@ -31,11 +39,10 @@ def user_label(uid, uname, fname=""):
     return str(uid)
 
 async def safe_edit(c: CallbackQuery, text: str, reply_markup=None):
-    try:
-        await c.message.edit_text(text, reply_markup=reply_markup)
+    try: await c.message.edit_text(text, reply_markup=reply_markup)
     except Exception:
         try: await c.message.delete()
-        except Exception: pass
+        except: pass
         await bot.send_message(c.from_user.id, text, reply_markup=reply_markup)
 
 async def _fake_cb(m: Message):
@@ -63,14 +70,13 @@ async def show_main_menu(target, user_id: int):
         try: await target.message.edit_text(text, reply_markup=kb)
         except Exception:
             try: await target.message.delete()
-            except Exception: pass
+            except: pass
             await bot.send_message(user_id, text, reply_markup=kb)
     else: await target.answer(text, reply_markup=kb)
 
 async def show_profile(c: CallbackQuery, target_user_id: int, admin_view: bool = False):
     u = await db.get_user(target_user_id)
-    if not u:
-        return await safe_edit(c, "❌ Пользователь не найден.", back_kb("admin_users" if admin_view else "back_main"))
+    if not u: return await safe_edit(c, "❌ Пользователь не найден.", back_kb("admin_users" if admin_view else "back_main"))
     
     text = f"👤 Профиль {user_label(u[0], u[1], u[2])}.\n{SEP}\n\nНик в боте: {u[3] or '—'}\nНик на сервере: {u[4] or '—'}\nФракция: {u[5] or '—'}"
     
@@ -81,21 +87,14 @@ async def show_profile(c: CallbackQuery, target_user_id: int, admin_view: bool =
         if admin_view: return await c.answer("Нет доступа", show_alert=True)
         kb = profile_kb()
 
-    if isinstance(c, _FakeCbForProfile):
-        await bot.send_message(target_user_id, text, reply_markup=kb)
-    else:
-        await safe_edit(c, text, kb)
+    if isinstance(c, _FakeCbForProfile): await bot.send_message(target_user_id, text, reply_markup=kb)
+    else: await safe_edit(c, text, kb)
 
 async def check_access(c: CallbackQuery) -> bool:
-    if c.from_user.id == ADMIN_ID:
-        return True # Админ всегда имеет доступ
+    if c.from_user.id == ADMIN_ID: return True
     tags = await db.get_user_tags(c.from_user.id)
-    if "banned" in tags:
-        await c.answer("🚫 Вы забанены.", show_alert=True)
-        return False
-    if "whitelisted" not in tags:
-        await c.answer("⏳ Вы ещё не в белом списке. Ожидайте одобрения анкеты.", show_alert=True)
-        return False
+    if "banned" in tags: return await c.answer("🚫 Вы забанены.", show_alert=True) or False
+    if "whitelisted" not in tags: return await c.answer("⏳ Вы ещё не в белом списке. Ожидайте одобрения анкеты.", show_alert=True) or False
     return True
 
 # ==================== СТАРТ И ИНТРО ====================
@@ -107,12 +106,7 @@ async def start(m: Message):
 
     if "banned" in tags: return await m.answer("🚫 Вы забанены.")
     if u[8] == 0 and m.from_user.id != ADMIN_ID:
-        text = (
-            f"👋 Здравствуйте, {m.from_user.first_name}!\n\n"
-            "Так как вы обратились ко мне, значит, вы хотите попасть на сервер FruzenWorld Legacy.\n"
-            "Это преимущественно ванильный сервер с элементами политики, но на нём есть плагины, несколько меняющие игру.\n\n"
-            "Для того, чтобы вступить сервер, вам нужно заполнить небольшую анкету. Готовы?"
-        )
+        text = f"👋 Здравствуйте, {m.from_user.first_name}!\n\nТак как вы обратились ко мне, значит, вы хотите попасть на сервер FruzenWorld Legacy.\nЭто преимущественно ванильный сервер с элементами политики, но на нём есть плагины, несколько меняющие игру.\n\nДля того, чтобы вступить сервер, вам нужно заполнить небольшую анкету. Готовы?"
         return await m.answer(text, reply_markup=intro_start_kb())
     if "processing" in tags and "whitelisted" not in tags and m.from_user.id != ADMIN_ID:
         return await m.answer("⏳ Ваша анкета находится на рассмотрении.")
@@ -124,8 +118,7 @@ async def cmd_skip(m: Message):
     if not is_admin(m.from_user.id): return
     await db.set_user_field(m.from_user.id, "intro_done", 1)
     tags = await db.get_user_tags(m.from_user.id)
-    if "whitelisted" not in tags:
-        await db.toggle_user_tag(m.from_user.id, "whitelisted")
+    if "whitelisted" not in tags: await db.toggle_user_tag(m.from_user.id, "whitelisted")
     await m.answer("✅ Интро пропущено. Вам выдан тег whitelisted.")
     await show_main_menu(m, m.from_user.id)
 
@@ -282,7 +275,20 @@ async def map_view(c: CallbackQuery):
 @dp.callback_query(F.data == "info")
 async def info_view(c: CallbackQuery):
     if not await check_access(c): return
-    text = f"ℹ️ Информация.\n{SEP}\n\nВерсия: {await db.get_global('server_version', '—')}\nЯдро: {await db.get_global('server_core', '—')}\nСезон: {await db.get_global('server_season', '—')}\nIP: {await db.get_global('server_ip', 'скрыт')}\nСтатус: {await db.get_global('server_status', 'неизвестно')}\n\nПолезные статьи:\n{await db.get_global('server_articles', '—')}"
+    
+    server_ip = await db.get_global("server_ip", "")
+    server_port = await db.get_global("server_port", "25565")
+    status_text = "🔴 Офлайн"
+    
+    if server_ip:
+        try:
+            server = await JavaServer.async_lookup(f"{server_ip}:{server_port}")
+            status = await server.async_status()
+            status_text = f"🟢 Онлайн ({status.players.online}/{status.players.max})"
+        except Exception:
+            status_text = "🔴 Офлайн"
+    
+    text = f"ℹ️ Информация.\n{SEP}\n\nВерсия: {await db.get_global('server_version', '—')}\nЯдро: {await db.get_global('server_core', '—')}\nСезон: {await db.get_global('server_season', '—')}\nIP: {server_ip or 'скрыт'}\nСтатус: {status_text}\n\nПолезные статьи:\n{await db.get_global('server_articles', '—')}"
     await safe_edit(c, text, back_kb())
     await c.answer()
 
@@ -295,35 +301,74 @@ async def rules_view(c: CallbackQuery):
     await safe_edit(c, "📜 Правила.\n" + SEP, kb)
     await c.answer()
 
+# ==================== ФОРМЫ ОБРАТНОЙ СВЯЗИ ====================
 @dp.callback_query(F.data == "form")
 async def form_view(c: CallbackQuery):
     if not await check_access(c): return
-    await safe_edit(c, "✉️ Отправить форму.\n" + SEP + "\n\nВ разработке.", back_kb())
+    await safe_edit(c, "✉️ Обратная связь.\n" + SEP + "\n\nВыбери тип обращения:", form_menu_kb())
     await c.answer()
 
-@dp.callback_query(F.data == "links")
-async def links_view(c: CallbackQuery):
-    if not await check_access(c): return
-    rows = await db.get_links()
+async def check_form_cooldown(c: CallbackQuery) -> bool:
+    if is_admin(c.from_user.id): return True
     tags = await db.get_user_tags(c.from_user.id)
-    kb = []
-    for _, title, url in rows: kb.append([InlineKeyboardButton(text=title, url=url)])
-    if "admin" in tags:
-        admin_chat_url = await db.get_global("admin_chat_url", "")
-        if admin_chat_url: kb.append([InlineKeyboardButton(text="🛡 Чат админов", url=admin_chat_url)])
-    kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")])
-    await safe_edit(c, "🔗 Ссылки.\n" + SEP, InlineKeyboardMarkup(inline_keyboard=kb))
+    if "muted" in tags:
+        await c.answer("🚫 Вам запрещено отправлять обращения (тег muted).", show_alert=True)
+        return False
+    
+    now = time.time()
+    last = FORM_COOLDOWNS.get(c.from_user.id, 0)
+    if now - last < FORM_COOLDOWN_TIME:
+        rem = int(FORM_COOLDOWN_TIME - (now - last))
+        await c.answer(f"⏳ Подождите {rem // 60} мин {rem % 60} сек.", show_alert=True)
+        return False
+    return True
+
+@dp.callback_query(F.data.startswith("form_"))
+async def form_start(c: CallbackQuery, state: FSMContext):
+    if not await check_access(c) or not await check_form_cooldown(c): return
+    form_type = c.data.split("_")[1]
+    await state.update_data(form_type=form_type)
+    
+    if form_type == "review":
+        await c.message.edit_text("📝 Напиши свой отзыв о сервере:")
+    elif form_type == "suggest":
+        await c.message.edit_text("💡 Напиши своё предложение или пожелание:")
+    elif form_type == "bug":
+        await c.message.edit_text("🐞 Опиши, что произошло, что ожидалось, и как это повторить:")
+    elif form_type == "report":
+        await c.message.edit_text("🚨 Напиши ник игрока и причину жалобы (через пробел):")
+    
+    await state.set_state(Form.form_text)
     await c.answer()
 
-@dp.callback_query(F.data == "resourcepack")
-async def rp_view(c: CallbackQuery):
-    if not await check_access(c): return
-    row = await db.get_resourcepack()
-    if not row or not row[0]: return await c.answer("Ресурспак не загружен", show_alert=True)
-    try: await c.message.delete()
-    except: pass
-    await bot.send_document(c.from_user.id, row[0], caption="📦 Ресурспак сервера.\n" + SEP + "\n\n" + (row[1] or ""), reply_markup=back_kb())
-    await c.answer()
+@dp.message(Form.form_text)
+async def form_text(m: Message, state: FSMContext):
+    data = await state.get_data()
+    form_type = data.get("form_type")
+    text = m.text.strip()
+    
+    # Обновляем кулдаун
+    FORM_COOLDOWNS[m.from_user.id] = time.time()
+    
+    user = await db.get_user(m.from_user.id)
+    user_info = f"@{m.from_user.username or 'нет'} (ID: {m.from_user.id})\nНик: {user[4] or user[3] or '—'}"
+    
+    types = {
+        "review": "📝 ОТЗЫВ",
+        "suggest": "💡 ПРЕДЛОЖЕНИЕ",
+        "bug": "🐞 БАГ",
+        "report": "🚨 ЖАЛОБА"
+    }
+    
+    msg = f"{types.get(form_type, '📩 ОБРАЩЕНИЕ')}\n{SEP}\nОт: {user_info}\n\n{text}"
+    try:
+        await bot.send_message(ADMIN_ID, msg)
+        await m.answer("✅ Ваше обращение отправлено администрации.")
+    except Exception as e:
+        await m.answer(f"❌ Ошибка при отправке: {e}")
+    
+    await state.clear()
+    await show_main_menu(await _fake_cb(m), m.from_user.id)
 
 # ==================== ПРОФИЛЬ ====================
 @dp.callback_query(F.data == "profile")
@@ -491,7 +536,6 @@ async def save_added_user(m: Message, state: FSMContext):
             await conn.execute("INSERT OR REPLACE INTO users (user_id, username, nick_server, fraction, uuid, intro_done, tags) VALUES (?, ?, ?, ?, ?, 1, 'whitelisted')",
                                (user_id, username, n_server, frac, uid_str))
         else:
-            # Если только юзернейм, создаем "фантомного" пользователя с ID 0
             await conn.execute("INSERT INTO users (user_id, username, nick_server, fraction, uuid, intro_done, tags) VALUES (NULL, ?, ?, ?, ?, 1, 'whitelisted')",
                                (username, n_server, frac, uid_str))
         await conn.commit()
@@ -500,7 +544,6 @@ async def save_added_user(m: Message, state: FSMContext):
     await state.clear()
     await admin_users(await _fake_cb(m))
 
-# --- Остальные админ-функции ---
 @dp.message(Form.admin_send_to_user)
 async def send_to_user(m: Message, state: FSMContext):
     data = await state.get_data()
@@ -612,6 +655,7 @@ async def faction_pick(c: CallbackQuery):
     await c.answer("Готово")
     await show_profile(c, uid, admin_view=True)
 
+# --- Управление белым списком ---
 @dp.callback_query(F.data == "admin_whitelist")
 async def admin_whitelist(c: CallbackQuery):
     if not is_admin(c.from_user.id): return
@@ -658,6 +702,7 @@ async def wl_del(c: CallbackQuery):
     else: await _render_wl_del_page(c, 0)
     await c.answer("Удалено")
 
+# --- Ссылки ---
 @dp.callback_query(F.data == "admin_links")
 async def admin_links(c: CallbackQuery):
     if not is_admin(c.from_user.id): return
@@ -818,7 +863,7 @@ async def admin_rp_del(c: CallbackQuery):
 @dp.callback_query(F.data == "admin_globals")
 async def admin_globals(c: CallbackQuery, state: FSMContext):
     if not is_admin(c.from_user.id): return
-    await c.message.answer("Введи: ключ значение\n\n(server_version, server_core, server_season, server_ip, server_status, server_articles)")
+    await c.message.answer("Введи: ключ значение\n\n(server_version, server_core, server_season, server_ip, server_port, server_status, server_articles)")
     await state.set_state(Form.admin_set_global)
     await c.answer()
 
@@ -904,6 +949,50 @@ async def tag_toggle(c: CallbackQuery):
     current = await db.get_user_tags(uid)
     await safe_edit(c, f"🏷 Теги пользователя {uid}.\n{SEP}\n\nНажми на тег, чтобы добавить/убрать:", tags_menu_kb(uid, current))
     await c.answer(f"Тег {'добавлен' if added else 'убран'}")
+
+# --- Синхронизация whitelist.json ---
+@dp.message(Command("syncwhitelist"))
+async def sync_whitelist_cmd(m: Message):
+    if not is_admin(m.from_user.id): return
+    if not os.path.exists("whitelist.json"):
+        return await m.answer("❌ Файл `whitelist.json` не найден. Загрузи его через /uploadwhitelist.")
+    
+    try:
+        with open("whitelist.json", "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        return await m.answer(f"❌ Ошибка чтения файла: {e}")
+
+    updated = 0
+    users = await db.get_all_users()
+    for entry in data:
+        nick = entry.get("name")
+        uuid = entry.get("uuid")
+        if not nick or not uuid: continue
+        for u_id, _, _ in users:
+            u = await db.get_user(u_id)
+            if u and u[4] and u[4].lower() == nick.lower():
+                await db.set_user_field(u_id, "uuid", uuid)
+                updated += 1
+                break
+    
+    await m.answer(f"✅ Синхронизация завершена. Обновлено UUID: {updated}")
+
+@dp.message(Command("uploadwhitelist"))
+async def upload_whitelist_cmd(m: Message):
+    if not is_admin(m.from_user.id): return
+    await m.answer("📥 Пришли файл `whitelist.json` (как документ).")
+
+@dp.message(F.document)
+async def handle_whitelist_file(m: Message):
+    if not is_admin(m.from_user.id): return
+    if not m.document.file_name or m.document.file_name != "whitelist.json": return
+    try:
+        file = await bot.get_file(m.document.file_id)
+        await bot.download_file(file.file_path, "whitelist.json")
+        await m.answer("✅ Файл `whitelist.json` обновлён. Теперь можешь выполнить `/syncwhitelist`.")
+    except Exception as e:
+        await m.answer(f"❌ Ошибка: {e}")
 
 # ==================== ЗАПУСК ====================
 async def main():
