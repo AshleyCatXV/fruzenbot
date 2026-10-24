@@ -13,47 +13,16 @@ async def init_db():
                 nick_server TEXT DEFAULT '',
                 fraction TEXT DEFAULT '',
                 uuid TEXT DEFAULT '',
-                tags TEXT DEFAULT ''
+                tags TEXT DEFAULT '',
+                intro_done INTEGER DEFAULT 0
             )
         """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS globals (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS factions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT UNIQUE
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS whitelist (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                nick TEXT UNIQUE
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS links (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT,
-                url TEXT
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS images (
-                key TEXT PRIMARY KEY,
-                file_id TEXT
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS resourcepack (
-                key TEXT PRIMARY KEY,
-                file_id TEXT,
-                instruction TEXT
-            )
-        """)
+        await db.execute("CREATE TABLE IF NOT EXISTS globals (key TEXT PRIMARY KEY, value TEXT)")
+        await db.execute("CREATE TABLE IF NOT EXISTS factions (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, leader_id INTEGER DEFAULT 0)")
+        await db.execute("CREATE TABLE IF NOT EXISTS whitelist (id INTEGER PRIMARY KEY AUTOINCREMENT, nick TEXT UNIQUE)")
+        await db.execute("CREATE TABLE IF NOT EXISTS links (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, url TEXT)")
+        await db.execute("CREATE TABLE IF NOT EXISTS images (key TEXT PRIMARY KEY, file_id TEXT)")
+        await db.execute("CREATE TABLE IF NOT EXISTS resourcepack (key TEXT PRIMARY KEY, file_id TEXT, instruction TEXT)")
         await db.commit()
 
         # Миграции
@@ -63,7 +32,8 @@ async def init_db():
         await _ensure_column(db, "users", "fraction", "TEXT DEFAULT ''")
         await _ensure_column(db, "users", "uuid", "TEXT DEFAULT ''")
         await _ensure_column(db, "users", "tags", "TEXT DEFAULT ''")
-
+        await _ensure_column(db, "users", "intro_done", "INTEGER DEFAULT 0")
+        await _ensure_column(db, "factions", "leader_id", "INTEGER DEFAULT 0")
 
 async def _ensure_column(db, table: str, column: str, coltype: str):
     async with db.execute(f"PRAGMA table_info({table})") as cur:
@@ -72,14 +42,18 @@ async def _ensure_column(db, table: str, column: str, coltype: str):
         await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
         await db.commit()
 
-
 # ---------- Пользователи ----------
 async def get_user(user_id: int):
     async with aiosqlite.connect(DB) as db:
         async with db.execute(
-            "SELECT user_id, username, nick_bot, nick_server, fraction, uuid, tags "
+            "SELECT user_id, username, first_name, nick_bot, nick_server, fraction, uuid, tags, intro_done "
             "FROM users WHERE user_id=?", (user_id,)
         ) as cur:
+            return await cur.fetchone()
+
+async def get_user_by_username(username: str):
+    async with aiosqlite.connect(DB) as db:
+        async with db.execute("SELECT * FROM users WHERE LOWER(username)=LOWER(?)", (username,)) as cur:
             return await cur.fetchone()
 
 async def add_user(user_id: int, username: str, first_name: str = ""):
@@ -88,21 +62,16 @@ async def add_user(user_id: int, username: str, first_name: str = ""):
             exists = await cur.fetchone()
         if not exists:
             await db.execute(
-                "INSERT INTO users (user_id, username, first_name, nick_bot) "
-                "VALUES (?, ?, ?, ?)",
+                "INSERT INTO users (user_id, username, first_name, nick_bot) VALUES (?, ?, ?, ?)",
                 (user_id, username or "", first_name or "", first_name or "")
             )
         else:
-            await db.execute(
-                "UPDATE users SET username=? WHERE user_id=?",
-                (username or "", user_id)
-            )
+            await db.execute("UPDATE users SET username=? WHERE user_id=?", (username or "", user_id))
         await db.commit()
 
-async def set_user_field(user_id: int, field: str, value: str):
-    allowed = {"nick_bot", "nick_server", "fraction", "uuid", "tags"}
-    if field not in allowed:
-        raise ValueError("Недопустимое поле")
+async def set_user_field(user_id: int, field: str, value):
+    allowed = {"nick_bot", "nick_server", "fraction", "uuid", "tags", "intro_done"}
+    if field not in allowed: return
     async with aiosqlite.connect(DB) as db:
         await db.execute(f"UPDATE users SET {field}=? WHERE user_id=?", (value, user_id))
         await db.commit()
@@ -112,32 +81,21 @@ async def get_all_users():
         async with db.execute("SELECT user_id, username, first_name FROM users ORDER BY user_id") as cur:
             return await cur.fetchall()
 
-async def find_user_by_nick_server(nick: str):
-    async with aiosqlite.connect(DB) as db:
-        async with db.execute(
-            "SELECT user_id, username, nick_server FROM users WHERE LOWER(nick_server)=LOWER(?)",
-            (nick,)
-        ) as cur:
-            return await cur.fetchone()
-
 # ---------- Теги ----------
 def parse_tags(tags_str: str) -> list:
-    if not tags_str:
-        return []
-    return [t.strip() for t in tags_str.split(",") if t.strip()]
+    return [t.strip() for t in tags_str.split(",") if t.strip()] if tags_str else []
 
 async def get_user_tags(user_id: int) -> list:
     u = await get_user(user_id)
-    if not u:
-        return []
-    return parse_tags(u[6])
+    return parse_tags(u[7]) if u else []
+
+async def has_tag(user_id: int, tag: str) -> bool:
+    return tag in await get_user_tags(user_id)
 
 async def toggle_user_tag(user_id: int, tag: str):
-    """Добавляет тег, если его нет; удаляет, если есть. Возвращает True если добавлен."""
     u = await get_user(user_id)
-    if not u:
-        return False
-    tags = parse_tags(u[6])
+    if not u: return False
+    tags = parse_tags(u[7])
     if tag in tags:
         tags.remove(tag)
         added = False
@@ -147,17 +105,10 @@ async def toggle_user_tag(user_id: int, tag: str):
     await set_user_field(user_id, "tags", ",".join(tags))
     return added
 
-async def has_tag(user_id: int, tag: str) -> bool:
-    return tag in await get_user_tags(user_id)
-
 # ---------- Глобальные ----------
 async def set_global(key: str, value: str):
     async with aiosqlite.connect(DB) as db:
-        await db.execute(
-            "INSERT INTO globals (key,value) VALUES (?,?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (key, value)
-        )
+        await db.execute("INSERT INTO globals (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
         await db.commit()
 
 async def get_global(key: str, default=""):
@@ -167,9 +118,14 @@ async def get_global(key: str, default=""):
             return row[0] if row else default
 
 # ---------- Фракции ----------
-async def add_faction(name: str):
+async def add_faction(name: str, leader_id: int = 0):
     async with aiosqlite.connect(DB) as db:
-        await db.execute("INSERT OR IGNORE INTO factions (name) VALUES (?)", (name,))
+        await db.execute("INSERT OR IGNORE INTO factions (name, leader_id) VALUES (?, ?)", (name, leader_id))
+        await db.commit()
+
+async def set_faction_leader(faction_name: str, leader_id: int):
+    async with aiosqlite.connect(DB) as db:
+        await db.execute("UPDATE factions SET leader_id=? WHERE name=?", (leader_id, faction_name))
         await db.commit()
 
 async def remove_faction_by_id(fid: int):
@@ -179,8 +135,13 @@ async def remove_faction_by_id(fid: int):
 
 async def get_factions():
     async with aiosqlite.connect(DB) as db:
-        async with db.execute("SELECT id, name FROM factions ORDER BY id") as cur:
+        async with db.execute("SELECT id, name, leader_id FROM factions ORDER BY id") as cur:
             return await cur.fetchall()
+
+async def get_faction_by_name(name: str):
+    async with aiosqlite.connect(DB) as db:
+        async with db.execute("SELECT id, name, leader_id FROM factions WHERE LOWER(name)=LOWER(?)", (name,)) as cur:
+            return await cur.fetchone()
 
 # ---------- Whitelist ----------
 async def add_whitelist(nick: str):
@@ -214,14 +175,10 @@ async def get_links():
         async with db.execute("SELECT id, title, url FROM links ORDER BY id") as cur:
             return await cur.fetchall()
 
-# ---------- Картинки ----------
+# ---------- Картинки и Ресурспак ----------
 async def set_image(key: str, file_id: str):
     async with aiosqlite.connect(DB) as db:
-        await db.execute(
-            "INSERT INTO images (key,file_id) VALUES (?,?) "
-            "ON CONFLICT(key) DO UPDATE SET file_id=excluded.file_id",
-            (key, file_id)
-        )
+        await db.execute("INSERT INTO images (key,file_id) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET file_id=excluded.file_id", (key, file_id))
         await db.commit()
 
 async def get_image(key: str):
@@ -235,14 +192,9 @@ async def delete_image(key: str):
         await db.execute("DELETE FROM images WHERE key=?", (key,))
         await db.commit()
 
-# ---------- Ресурспак ----------
 async def set_resourcepack(file_id: str, instruction: str):
     async with aiosqlite.connect(DB) as db:
-        await db.execute(
-            "INSERT INTO resourcepack (key, file_id, instruction) VALUES ('main', ?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET file_id=excluded.file_id, instruction=excluded.instruction",
-            (file_id, instruction)
-        )
+        await db.execute("INSERT INTO resourcepack (key, file_id, instruction) VALUES ('main', ?, ?) ON CONFLICT(key) DO UPDATE SET file_id=excluded.file_id, instruction=excluded.instruction", (file_id, instruction))
         await db.commit()
 
 async def get_resourcepack():
