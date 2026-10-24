@@ -280,12 +280,21 @@ async def info_view(c: CallbackQuery):
     status_text = "🔴 Офлайн"
     
     if server_ip:
+        # Пытаемся подключиться напрямую по IP и порту (для нестандартных портов)
         try:
-            server = await JavaServer.async_lookup(f"{server_ip}:{server_port}")
+            port = int(server_port) if server_port else 25565
+            server = JavaServer(server_ip, port)
             status = await server.async_status()
             status_text = f"🟢 Онлайн ({status.players.online}/{status.players.max})"
-        except Exception:
-            status_text = "🔴 Офлайн"
+        except Exception as e:
+            # Если не вышло, пробуем через lookup (на случай SRV-записей)
+            try:
+                server = await JavaServer.async_lookup(f"{server_ip}:{server_port}")
+                status = await server.async_status()
+                status_text = f"🟢 Онлайн ({status.players.online}/{status.players.max})"
+            except Exception as e2:
+                logging.error(f"Ошибка статуса: {e} | {e2}")
+                status_text = "🔴 Офлайн (ошибка подключения)"
     
     text = f"ℹ️ Информация.\n{SEP}\n\nВерсия: {await db.get_global('server_version', '—')}\nЯдро: {await db.get_global('server_core', '—')}\nСезон: {await db.get_global('server_season', '—')}\nIP: {server_ip}:{server_port}\nСтатус: {status_text}\n\nПолезные статьи:\n{await db.get_global('server_articles', '—')}"
     await safe_edit(c, text, back_kb())
