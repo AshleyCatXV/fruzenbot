@@ -300,6 +300,30 @@ async def rules_view(c: CallbackQuery):
     await safe_edit(c, "📜 Правила.\n" + SEP, kb)
     await c.answer()
 
+@dp.callback_query(F.data == "links")
+async def links_view(c: CallbackQuery):
+    if not await check_access(c): return
+    rows = await db.get_links()
+    tags = await db.get_user_tags(c.from_user.id)
+    kb = []
+    for _, title, url in rows: kb.append([InlineKeyboardButton(text=title, url=url)])
+    if "admin" in tags:
+        admin_chat_url = await db.get_global("admin_chat_url", "")
+        if admin_chat_url: kb.append([InlineKeyboardButton(text="🛡 Чат админов", url=admin_chat_url)])
+    kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")])
+    await safe_edit(c, "🔗 Ссылки.\n" + SEP, InlineKeyboardMarkup(inline_keyboard=kb))
+    await c.answer()
+
+@dp.callback_query(F.data == "resourcepack")
+async def rp_view(c: CallbackQuery):
+    if not await check_access(c): return
+    row = await db.get_resourcepack()
+    if not row or not row[0]: return await c.answer("Ресурспак не загружен", show_alert=True)
+    try: await c.message.delete()
+    except: pass
+    await bot.send_document(c.from_user.id, row[0], caption="📦 Ресурспак сервера.\n" + SEP + "\n\n" + (row[1] or ""), reply_markup=back_kb())
+    await c.answer()
+
 # ==================== ФОРМЫ ОБРАТНОЙ СВЯЗИ ====================
 @dp.callback_query(F.data == "form")
 async def form_view(c: CallbackQuery):
@@ -562,13 +586,14 @@ async def admin_edit_field(c: CallbackQuery, state: FSMContext):
     if not is_admin(c.from_user.id): return
     _, field, uid_str = c.data.split(":")
     uid = int(uid_str)
+    
     if field == "fraction":
-        rows = await db.get_factions()
-        if not rows: return await c.answer("Сначала добавь фракции.", show_alert=True)
-        kb = paginated_kb(rows, 0, PER_PAGE, f"faction_pick:{uid}:", "admin_users", nav_prefix="fpp")
-        await safe_edit(c, f"🎯 Выбери фракцию для пользователя {uid}.\n" + SEP, kb)
+        await c.message.answer("Введи название фракции (точно как в списке):")
+        await state.update_data(target_user=uid, target_field=field)
+        await state.set_state(Form.admin_edit_user)
         await c.answer()
         return
+        
     prompts = {"nick_bot": "Введи новый ник в боте:", "nick_server": "Введи новый ник на сервере Minecraft:", "uuid": "Введи новый UUID:"}
     await c.message.answer(prompts[field])
     await state.update_data(target_user=uid, target_field=field)
@@ -633,66 +658,44 @@ async def faction_del(c: CallbackQuery):
 
 # --- Назначение главы ---
 @dp.callback_query(F.data == "admin_faction_leader")
-async def admin_faction_leader(c: CallbackQuery):
+async def admin_faction_leader(c: CallbackQuery, state: FSMContext):
     if not is_admin(c.from_user.id): return
     rows = await db.get_factions()
     if not rows: return await c.answer("Фракций нет.", show_alert=True)
-    kb = paginated_kb([(r[0], r[1]) for r in rows], 0, PER_PAGE, "f_leader_pick:", "admin_factions", nav_prefix="flp")
-    await safe_edit(c, "👑 Выбери фракцию, чтобы назначить главу.\n" + SEP, kb)
+    await c.message.answer("Введи название фракции, а затем через пробел ник игрока на сервере:\n\nПример: Азурия AshleyCatXV")
+    await state.set_state(Form.admin_add_faction) # используем то же состояние
     await c.answer()
 
-@dp.callback_query(F.data.startswith("flp:f_leader_pick:"))
-async def f_leader_page(c: CallbackQuery):
-    page = int(c.data.split(":")[2])
-    rows = await db.get_factions()
-    kb = paginated_kb([(r[0], r[1]) for r in rows], page, PER_PAGE, "f_leader_pick:", "admin_factions", nav_prefix="flp")
-    await safe_edit(c, "👑 Выбери фракцию, чтобы назначить главу.\n" + SEP, kb)
-    await c.answer()
-
-@dp.callback_query(F.data.startswith("f_leader_pick:"))
-async def f_leader_pick(c: CallbackQuery):
-    if not is_admin(c.from_user.id): return
-    fid = int(c.data.split(":")[1])
-    users = await db.get_all_users()
-    kb = paginated_users_kb(users, 0, f"f_leader_set:{fid}:", "admin_factions", per_page=PER_PAGE)
-    await safe_edit(c, "👑 Выбери игрока, который станет главой.\n" + SEP, kb)
-    await c.answer()
-
-@dp.callback_query(F.data.startswith("f_leader_set:"))
-async def f_leader_set(c: CallbackQuery):
-    if not is_admin(c.from_user.id): return
-    parts = c.data.split(":")
-    fid = int(parts[1])
-    uid = int(parts[2])
+# Перехватываем ввод для назначения главы
+@dp.message(Form.admin_add_faction)
+async def save_faction_or_leader(m: Message, state: FSMContext):
+    text = m.text.strip()
+    parts = text.split(maxsplit=1)
     
-    rows = await db.get_factions()
-    f = next((r for r in rows if r[0] == fid), None)
-    if not f: return await c.answer("Фракция не найдена.", show_alert=True)
-    
-    await db.set_faction_leader(f[1], uid)
-    await c.answer("✅ Глава назначен.")
-    await admin_faction_leader(c)
+    if len(parts) == 2:
+        fname, nick = parts
+        rows = await db.get_factions()
+        f = next((r for r in rows if r[1].lower() == fname.lower()), None)
+        if f:
+            users = await db.get_all_users()
+            for u_id, _, _ in users:
+                u = await db.get_user(u_id)
+                if u and u[4] and u[4].lower() == nick.lower():
+                    await db.set_faction_leader(f[1], u_id)
+                    await m.answer(f"✅ Игрок {nick} назначен главой фракции {f[1]}.")
+                    await state.clear()
+                    await admin_factions(await _fake_cb(m))
+                    return
+            await m.answer("❌ Игрок с таким ником не найден в базе бота.")
+            return
+        await m.answer("❌ Фракция не найдена. Введи название из списка.")
+        return
 
-@dp.callback_query(F.data.startswith("fpp:faction_pick:"))
-async def faction_pick_page(c: CallbackQuery):
-    parts = c.data.split(":")
-    uid, page = int(parts[2]), int(parts[3])
-    rows = await db.get_factions()
-    kb = paginated_kb(rows, page, PER_PAGE, f"faction_pick:{uid}:", "admin_users", nav_prefix="fpp")
-    await safe_edit(c, f"🎯 Выбери фракцию для пользователя {uid}.\n" + SEP, kb)
-    await c.answer()
-
-@dp.callback_query(F.data.startswith("faction_pick:"))
-async def faction_pick(c: CallbackQuery):
-    if not is_admin(c.from_user.id): return
-    parts = c.data.split(":")
-    uid, fid = int(parts[1]), int(parts[2])
-    rows = await db.get_factions()
-    name = next((n for i, n, _ in rows if i == fid), None)
-    if not name: return await c.answer("Фракция не найдена.", show_alert=True)
-    await db.set_user_field(uid, "fraction", name)
-    await c.answer("Готово")
-    await show_profile(c, uid, admin_view=True)
+    # Если введено одно слово — это создание фракции
+    await db.add_faction(text)
+    await state.clear()
+    await m.answer("✅ Фракция добавлена.")
+    await admin_factions(await _fake_cb(m))
 
 @dp.callback_query(F.data == "admin_whitelist")
 async def admin_whitelist(c: CallbackQuery):
