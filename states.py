@@ -24,3 +24,6 @@ class Form(StatesGroup):
     intro_faction_join = State()
     intro_faction_create_name = State()
     intro_faction_create_flag = State()
+
+    # Формы
+    form_text = State()
