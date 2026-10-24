@@ -3,6 +3,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import aiosqlite
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
@@ -86,6 +87,8 @@ async def show_profile(c: CallbackQuery, target_user_id: int, admin_view: bool =
         await safe_edit(c, text, kb)
 
 async def check_access(c: CallbackQuery) -> bool:
+    if c.from_user.id == ADMIN_ID:
+        return True # Админ всегда имеет доступ
     tags = await db.get_user_tags(c.from_user.id)
     if "banned" in tags:
         await c.answer("🚫 Вы забанены.", show_alert=True)
@@ -114,6 +117,17 @@ async def start(m: Message):
     if "processing" in tags and "whitelisted" not in tags:
         return await m.answer("⏳ Ваша анкета находится на рассмотрении.")
 
+    await show_main_menu(m, m.from_user.id)
+
+@dp.message(Command("skip"))
+async def cmd_skip(m: Message):
+    if not is_admin(m.from_user.id): return
+    await db.set_user_field(m.from_user.id, "intro_done", 1)
+    tags = await db.get_user_tags(m.from_user.id)
+    if "whitelisted" not in tags:
+        await db.toggle_user_tag(m.from_user.id, "whitelisted")
+    
+    await m.answer("✅ Интро пропущено. Вам выдан тег whitelisted.")
     await show_main_menu(m, m.from_user.id)
 
 @dp.callback_query(F.data == "intro_cancel")
