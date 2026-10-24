@@ -1033,16 +1033,17 @@ async def tag_toggle(c: CallbackQuery):
     await safe_edit(c, f"🏷 Теги пользователя {uid}.\n{SEP}\n\nНажми на тег, чтобы добавить/убрать:", tags_menu_kb(uid, current))
     await c.answer(f"Тег {'добавлен' if added else 'убран'}")
 
-# --- Синхронизация whitelist.json ---
+# --- Синхронизация whitelist.json (через БД) ---
 @dp.message(Command("syncwhitelist"))
 async def sync_whitelist_cmd(m: Message):
     if not is_admin(m.from_user.id): return
-    if not os.path.exists("whitelist.json"):
-        return await m.answer("❌ Файл `whitelist.json` не найден. Загрузи его через /uploadwhitelist.")
+    
+    json_text = await db.get_whitelist_json()
+    if not json_text:
+        return await m.answer("❌ Файл `whitelist.json` не найден в базе. Загрузи его через /uploadwhitelist.")
     
     try:
-        with open("whitelist.json", "r", encoding="utf-8") as f:
-            data = json.load(f)
+        data = json.loads(json_text)
     except Exception as e:
         return await m.answer(f"❌ Ошибка чтения файла: {e}")
 
@@ -1072,8 +1073,17 @@ async def handle_whitelist_file(m: Message):
     if not m.document.file_name or m.document.file_name != "whitelist.json": return
     try:
         file = await bot.get_file(m.document.file_id)
-        await bot.download_file(file.file_path, "whitelist.json")
-        await m.answer("✅ Файл `whitelist.json` обновлён. Теперь можешь выполнить `/syncwhitelist`.")
+        # Скачиваем файл в память (байты) и декодируем как текст
+        file_bytes = await bot.download_file(file.file_path)
+        text = file_bytes.read().decode("utf-8")
+        
+        # Проверяем, что это валидный JSON
+        json.loads(text)
+        
+        # Сохраняем в базу
+        await db.set_whitelist_json(text)
+        
+        await m.answer("✅ Файл `whitelist.json` сохранён в базу. Теперь можешь выполнить `/syncwhitelist`.")
     except Exception as e:
         await m.answer(f"❌ Ошибка: {e}")
 
