@@ -106,7 +106,7 @@ async def start(m: Message):
     tags = await db.get_user_tags(m.from_user.id)
 
     if "banned" in tags: return await m.answer("🚫 Вы забанены.")
-    if u[8] == 0:
+    if u[8] == 0 and m.from_user.id != ADMIN_ID:
         text = (
             f"👋 Здравствуйте, {m.from_user.first_name}!\n\n"
             "Так как вы обратились ко мне, значит, вы хотите попасть на сервер FruzenWorld Legacy.\n"
@@ -114,7 +114,7 @@ async def start(m: Message):
             "Для того, чтобы вступить сервер, вам нужно заполнить небольшую анкету. Готовы?"
         )
         return await m.answer(text, reply_markup=intro_start_kb())
-    if "processing" in tags and "whitelisted" not in tags:
+    if "processing" in tags and "whitelisted" not in tags and m.from_user.id != ADMIN_ID:
         return await m.answer("⏳ Ваша анкета находится на рассмотрении.")
 
     await show_main_menu(m, m.from_user.id)
@@ -126,7 +126,6 @@ async def cmd_skip(m: Message):
     tags = await db.get_user_tags(m.from_user.id)
     if "whitelisted" not in tags:
         await db.toggle_user_tag(m.from_user.id, "whitelisted")
-    
     await m.answer("✅ Интро пропущено. Вам выдан тег whitelisted.")
     await show_main_menu(m, m.from_user.id)
 
@@ -437,11 +436,23 @@ async def admin_menu(c: CallbackQuery):
     await safe_edit(c, "🛠 Меню создателя.\n" + SEP, admin_kb())
     await c.answer()
 
+# --- Пользователи (добавление нового) ---
 @dp.callback_query(F.data == "admin_users")
 async def admin_users(c: CallbackQuery):
     if not is_admin(c.from_user.id): return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Добавить пользователя", callback_data="admin_add_user")],
+        [InlineKeyboardButton(text="📋 Все пользователи", callback_data="admin_list_users")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin")]
+    ])
+    await safe_edit(c, "👥 Управление пользователями.\n" + SEP, kb)
+    await c.answer()
+
+@dp.callback_query(F.data == "admin_list_users")
+async def admin_list_users(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return
     users = await db.get_all_users()
-    kb = paginated_users_kb(users, 0, "user_view:", "admin")
+    kb = paginated_users_kb(users, 0, "user_view:", "admin_users")
     await safe_edit(c, f"👥 Пользователи ({len(users)}).\n" + SEP, kb)
     await c.answer()
 
@@ -449,7 +460,7 @@ async def admin_users(c: CallbackQuery):
 async def users_page(c: CallbackQuery):
     page = int(c.data.split(":")[2])
     users = await db.get_all_users()
-    kb = paginated_users_kb(users, page, "user_view:", "admin")
+    kb = paginated_users_kb(users, page, "user_view:", "admin_users")
     await safe_edit(c, f"👥 Пользователи.\n" + SEP, kb)
     await c.answer()
 
@@ -459,6 +470,37 @@ async def user_view(c: CallbackQuery):
     await show_profile(c, int(c.data.split(":")[1]), admin_view=True)
     await c.answer()
 
+@dp.callback_query(F.data == "admin_add_user")
+async def admin_add_user(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c.from_user.id): return
+    await c.message.answer("Введи через пробел: @username или ID, Ник на сервере, Фракция, UUID\n\n(Если чего-то нет, пиши -)")
+    await state.set_state(Form.admin_add_user_manually)
+    await c.answer()
+
+@dp.message(Form.admin_add_user_manually)
+async def save_added_user(m: Message, state: FSMContext):
+    parts = m.text.split(maxsplit=3)
+    if len(parts) < 4: return await m.answer("❌ Нужно 4 параметра: @username/ID Ник Фракция UUID")
+    
+    target, n_server, frac, uid_str = parts
+    username = target.lstrip("@")
+    user_id = int(target) if target.isdigit() else 0
+    
+    async with aiosqlite.connect(db.DB) as conn:
+        if user_id:
+            await conn.execute("INSERT OR REPLACE INTO users (user_id, username, nick_server, fraction, uuid, intro_done, tags) VALUES (?, ?, ?, ?, ?, 1, 'whitelisted')",
+                               (user_id, username, n_server, frac, uid_str))
+        else:
+            # Если только юзернейм, создаем "фантомного" пользователя с ID 0
+            await conn.execute("INSERT INTO users (user_id, username, nick_server, fraction, uuid, intro_done, tags) VALUES (NULL, ?, ?, ?, ?, 1, 'whitelisted')",
+                               (username, n_server, frac, uid_str))
+        await conn.commit()
+    
+    await m.answer("✅ Пользователь добавлен.")
+    await state.clear()
+    await admin_users(await _fake_cb(m))
+
+# --- Остальные админ-функции ---
 @dp.message(Form.admin_send_to_user)
 async def send_to_user(m: Message, state: FSMContext):
     data = await state.get_data()
