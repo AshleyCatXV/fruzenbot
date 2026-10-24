@@ -206,3 +206,14 @@ async def delete_resourcepack():
     async with aiosqlite.connect(DB) as db:
         await db.execute("DELETE FROM resourcepack WHERE key='main'")
         await db.commit()
+# ---------- Whitelist JSON ----------
+async def set_whitelist_json(json_text: str):
+    async with aiosqlite.connect(DB) as db:
+        await db.execute("INSERT INTO globals (key,value) VALUES ('whitelist_json', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json_text,))
+        await db.commit()
+
+async def get_whitelist_json():
+    async with aiosqlite.connect(DB) as db:
+        async with db.execute("SELECT value FROM globals WHERE key='whitelist_json'") as cur:
+            row = await cur.fetchone()
+            return row[0] if row else None
