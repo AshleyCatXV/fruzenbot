@@ -81,7 +81,7 @@ def admin_links_kb():
     ])
 
 def user_profile_admin_kb(target_user_id: int, tags: list = None):
-    kb = [
+    return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🏷 Теги", callback_data=f"tags_menu:{target_user_id}")],
         [InlineKeyboardButton(text="✉️ Сообщение пользователю", callback_data=f"msg_user:{target_user_id}")],
         [InlineKeyboardButton(text="✏️ Ник в боте", callback_data=f"aedit:nick_bot:{target_user_id}")],
@@ -89,8 +89,7 @@ def user_profile_admin_kb(target_user_id: int, tags: list = None):
         [InlineKeyboardButton(text="🎯 Фракция", callback_data=f"aedit:fraction:{target_user_id}")],
         [InlineKeyboardButton(text="🆔 UUID", callback_data=f"aedit:uuid:{target_user_id}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_users")],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=kb)
+    ])
 
 def tags_menu_kb(target_user_id: int, current_tags: list):
     kb = []
@@ -100,30 +99,30 @@ def tags_menu_kb(target_user_id: int, current_tags: list):
     kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"user_view:{target_user_id}")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
-# --- Кнопки для интро ---
+# --- Кнопки для интро с эмодзи ---
 def intro_start_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Продолжить", callback_data="intro_next")],
-        [InlineKeyboardButton(text="Отменить", callback_data="intro_cancel")]
+        [InlineKeyboardButton(text="▶️ Продолжить", callback_data="intro_next")],
+        [InlineKeyboardButton(text="❌ Отменить", callback_data="intro_cancel")]
     ])
 
 def intro_activity_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Да, являюсь", callback_data="intro_act:yes")],
-        [InlineKeyboardButton(text="Как когда", callback_data="intro_act:sometimes")],
-        [InlineKeyboardButton(text="Нет, не являюсь", callback_data="intro_act:no")]
+        [InlineKeyboardButton(text="🟢 Да, являюсь", callback_data="intro_act:yes")],
+        [InlineKeyboardButton(text="🟡 Как когда", callback_data="intro_act:sometimes")],
+        [InlineKeyboardButton(text="🔴 Нет, не являюсь", callback_data="intro_act:no")]
     ])
 
 def intro_faction_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Создать свою", callback_data="intro_frac:create")],
-        [InlineKeyboardButton(text="Присоединиться к существующей", callback_data="intro_frac:join")]
+        [InlineKeyboardButton(text="🛠 Создать свою", callback_data="intro_frac:create")],
+        [InlineKeyboardButton(text="🤝 Присоединиться к существующей", callback_data="intro_frac:join")]
     ])
 
 def intro_finish_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Отправить", callback_data="intro_submit")],
-        [InlineKeyboardButton(text="Начать заново", callback_data="intro_restart")]
+        [InlineKeyboardButton(text="✅ Отправить", callback_data="intro_submit")],
+        [InlineKeyboardButton(text="🔄 Начать заново", callback_data="intro_restart")]
     ])
 
 def intro_review_kb(user_id: int):
@@ -132,7 +131,6 @@ def intro_review_kb(user_id: int):
         [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"intro_reject:{user_id}")]
     ])
 
-# --- Пагинация ---
 def paginated_kb(items, page: int, per_page: int, prefix: str, back_target: str, nav_prefix: str = "pg"):
     total_pages = max(1, (len(items) + per_page - 1) // per_page)
     page = max(0, min(page, total_pages - 1))
