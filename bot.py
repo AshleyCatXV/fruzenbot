@@ -71,21 +71,29 @@ async def show_profile(c: CallbackQuery, target_user_id: int, admin_view: bool =
     if not u:
         return await safe_edit(c, "❌ Пользователь не найден.", back_kb("admin_users" if admin_view else "back_main"))
     
-    # u = (user_id, username, first_name, nick_bot, nick_server, fraction, uuid, tags, intro_done)
     text = f"👤 Профиль {user_label(u[0], u[1], u[2])}.\n{SEP}\n\nНик в боте: {u[3] or '—'}\nНик на сервере: {u[4] or '—'}\nФракция: {u[5] or '—'}"
     
     if is_admin(c.from_user.id):
         text += f"\nUUID: {u[6] or '—'}\nТеги: {', '.join(db.parse_tags(u[7])) or '—'}"
         kb = user_profile_admin_kb(target_user_id)
     else:
-        if admin_view: # Защита, если обычный юзер как-то пролез
-            return await c.answer("Нет доступа", show_alert=True)
+        if admin_view: return await c.answer("Нет доступа", show_alert=True)
         kb = profile_kb()
 
     if isinstance(c, _FakeCbForProfile):
         await bot.send_message(target_user_id, text, reply_markup=kb)
     else:
         await safe_edit(c, text, kb)
+
+async def check_access(c: CallbackQuery) -> bool:
+    tags = await db.get_user_tags(c.from_user.id)
+    if "banned" in tags:
+        await c.answer("🚫 Вы забанены.", show_alert=True)
+        return False
+    if "whitelisted" not in tags:
+        await c.answer("⏳ Вы ещё не в белом списке. Ожидайте одобрения анкеты.", show_alert=True)
+        return False
+    return True
 
 # ==================== СТАРТ И ИНТРО ====================
 @dp.message(CommandStart())
@@ -96,17 +104,19 @@ async def start(m: Message):
 
     if "banned" in tags:
         return await m.answer("🚫 Вы забанены.")
-
-    if u[8] == 0: # intro_done == 0
+    if u[8] == 0:
         text = (
             f"👋 Здравствуйте, {m.from_user.first_name}!\n\n"
             "Так как вы обратились ко мне, значит, вы хотите попасть на сервер FruzenWorld Legacy.\n"
             "Это преимущественно ванильный сервер с элементами политики, но на нём есть плагины, несколько меняющие игру.\n\n"
             "Для того, чтобы вступить сервер, вам нужно заполнить небольшую анкету. Готовы?"
         )
-        await m.answer(text, reply_markup=intro_start_kb())
-    else:
-        await show_main_menu(m, m.from_user.id)
+        return await m.answer(text, reply_markup=intro_start_kb())
+    
+    if "processing" in tags and "whitelisted" not in tags:
+        return await m.answer("⏳ Ваша анкета находится на рассмотрении.")
+
+    await show_main_menu(m, m.from_user.id)
 
 @dp.callback_query(F.data == "intro_cancel")
 async def intro_cancel(c: CallbackQuery):
@@ -150,8 +160,7 @@ async def intro_act(c: CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == "intro_frac:join")
 async def intro_join(c: CallbackQuery, state: FSMContext):
     rows = await db.get_factions()
-    if not rows:
-        return await c.answer("Фракций пока нет, придётся создать свою!", show_alert=True)
+    if not rows: return await c.answer("Фракций пока нет, придётся создать свою!", show_alert=True)
     kb = paginated_kb([(r[0], r[1]) for r in rows], 0, PER_PAGE, "intro_join_frac:", "intro_restart", nav_prefix="ij")
     await safe_edit(c, "К какой фракции вы хотите присоединиться?", kb)
 
@@ -183,10 +192,8 @@ async def intro_create_name(m: Message, state: FSMContext):
     await state.update_data(intro_frac_create=m.text.strip())
     text = "🔰 Вы почти создали свою фракцию!\n\nВам осталось только создать свой флаг. Этот флаг должен быть на баннере в Minecraft и иметь не более 6 слоёв (ванильное ограничение), а также вы должны указать, как именно его нужно создать.\n\nПример того, как нужно отправлять флаг для своей фракции:"
     file_id = await db.get_image("flag_example")
-    if file_id:
-        await m.answer_photo(file_id, caption=text)
-    else:
-        await m.answer(text + "\n\n(Пример ещё не загружен создателем)")
+    if file_id: await m.answer_photo(file_id, caption=text)
+    else: await m.answer(text + "\n\n(Пример ещё не загружен создателем)")
     await state.set_state(Form.intro_faction_create_flag)
 
 @dp.message(Form.intro_faction_create_flag, F.photo)
@@ -222,28 +229,18 @@ async def intro_submit(c: CallbackQuery, state: FSMContext):
     await db.set_user_field(c.from_user.id, "intro_done", 1)
     await db.toggle_user_tag(c.from_user.id, "processing") # Добавляем processing
     
-    # Отправка админу
-    nick = data.get("intro_nick", "—")
-    name = data.get("intro_name", "—")
-    act = data.get("intro_act", "—")
-    join_frac = data.get("intro_frac_join")
-    create_frac = data.get("intro_frac_create")
-    
     msg = (
         f"📝 Новая анкета!\n{SEP}\n"
         f"Пользователь: @{c.from_user.username or 'нет'} (ID: {c.from_user.id})\n"
-        f"Ник в игре: {nick}\n"
-        f"Обращение: {name}\n"
-        f"Активность: {act}\n"
+        f"Ник в игре: {data.get('intro_nick', '—')}\n"
+        f"Обращение: {data.get('intro_name', '—')}\n"
+        f"Активность: {data.get('intro_act', '—')}\n"
     )
-    if join_frac:
-        msg += f"Хочет присоединиться к: {join_frac}"
-    elif create_frac:
-        msg += f"Хочет создать: {create_frac}"
+    if data.get("intro_frac_join"): msg += f"Хочет присоединиться к: {data.get('intro_frac_join')}"
+    elif data.get("intro_frac_create"): msg += f"Хочет создать: {data.get('intro_frac_create')}"
     
     await bot.send_message(ADMIN_ID, msg, reply_markup=intro_review_kb(c.from_user.id))
-    if data.get("intro_flag"):
-        await bot.send_photo(ADMIN_ID, data.get("intro_flag"), caption="Флаг новой фракции")
+    if data.get("intro_flag"): await bot.send_photo(ADMIN_ID, data.get("intro_flag"), caption="Флаг новой фракции")
 
     await safe_edit(c, "✅ Анкета отправлена на рассмотрение администрации. Ожидайте ответа!")
     await c.answer()
@@ -252,16 +249,10 @@ async def intro_submit(c: CallbackQuery, state: FSMContext):
 async def intro_approve(c: CallbackQuery):
     if not is_admin(c.from_user.id): return
     uid = int(c.data.split(":")[1])
-    
-    # Убираем processing, даем whitelisted
     tags = await db.get_user_tags(uid)
     if "processing" in tags: await db.toggle_user_tag(uid, "processing")
     if "whitelisted" not in tags: await db.toggle_user_tag(uid, "whitelisted")
-    
-    # Если была создана фракция, добавляем её в БД
-    u = await db.get_user(uid)
-    if u:
-        await bot.send_message(uid, "🎉 Ваша анкета одобрена! Добро пожаловать на сервер FruzenWorld Legacy.")
+    await bot.send_message(uid, "🎉 Ваша анкета одобрена! Добро пожаловать на сервер FruzenWorld Legacy.")
     await c.message.edit_text(c.message.html_text + "\n\n✅ ОДОБРЕНО", reply_markup=None)
     await c.answer("Одобрено")
 
@@ -276,28 +267,6 @@ async def intro_reject(c: CallbackQuery):
     await c.answer("Отклонено")
 
 # ==================== ГЛАВНОЕ МЕНЮ ====================
-@dp.message(CommandStart())
-async def start(m: Message):
-    await db.add_user(m.from_user.id, m.from_user.username or "", m.from_user.first_name or "")
-    u = await db.get_user(m.from_user.id)
-    tags = await db.get_user_tags(m.from_user.id)
-
-    if "banned" in tags:
-        return await m.answer("🚫 Вы забанены.")
-    if u[8] == 0:
-        text = (
-            f"👋 Здравствуйте, {m.from_user.first_name}!\n\n"
-            "Так как вы обратились ко мне, значит, вы хотите попасть на сервер FruzenWorld Legacy.\n"
-            "Это преимущественно ванильный сервер с элементами политики, но на нём есть плагины, несколько меняющие игру.\n\n"
-            "Для того, чтобы вступить сервер, вам нужно заполнить небольшую анкету. Готовы?"
-        )
-        return await m.answer(text, reply_markup=intro_start_kb())
-    
-    if "processing" in tags and "whitelisted" not in tags:
-        return await m.answer("⏳ Ваша анкета находится на рассмотрении.")
-
-    await show_main_menu(m, m.from_user.id)
-
 @dp.callback_query(F.data == "back_main")
 async def back_main(c: CallbackQuery):
     if not await check_access(c): return
@@ -306,16 +275,6 @@ async def back_main(c: CallbackQuery):
 
 @dp.callback_query(F.data == "noop")
 async def noop(c: CallbackQuery): await c.answer()
-
-async def check_access(c: CallbackQuery) -> bool:
-    tags = await db.get_user_tags(c.from_user.id)
-    if "banned" in tags:
-        await c.answer("🚫 Вы забанены.", show_alert=True)
-        return False
-    if "whitelisted" not in tags:
-        await c.answer("⏳ Вы ещё не в белом списке. Ожидайте одобрения анкеты.", show_alert=True)
-        return False
-    return True
 
 # ==================== ИНФОРМАЦИЯ И КАРТА ====================
 @dp.callback_query(F.data == "map")
@@ -467,14 +426,8 @@ async def players_page(c: CallbackQuery):
 async def player_profile(c: CallbackQuery):
     if not await check_access(c): return
     wid = int(c.data.split(":")[1])
-    # Ищем юзера по нику на сервере
     users = await db.get_all_users()
     target = None
-    for u_id, _, _ in users:
-        u_data = await db.get_user(u_id)
-        if u_data and u_data[4] == wid: # По ID из whitelist не сходится, нужно по нику
-            pass
-    # Проще: берем ник из whitelist по ID и ищем юзера
     wl = await db.get_whitelist()
     nick = next((n for i, n in wl if i == wid), None)
     if nick:
@@ -485,7 +438,6 @@ async def player_profile(c: CallbackQuery):
                 break
     
     if not target: return await c.answer("Игрок ещё не заходил в бота.", show_alert=True)
-    
     u = await db.get_user(target)
     text = f"👤 Профиль игрока.\n{SEP}\n\nНик: {u[4]}\nФракция: {u[5] or '—'}"
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -504,27 +456,6 @@ async def msg_player(c: CallbackQuery, state: FSMContext):
     await state.set_state(Form.admin_send_to_user)
     await c.answer()
 
-@dp.message(Form.admin_send_to_user)
-async def send_to_user(m: Message, state: FSMContext):
-    data = await state.get_data()
-    uid = data.get("target_user")
-    is_player = data.get("is_player_msg", False)
-    
-    sender_u = await db.get_user(m.from_user.id)
-    sender_info = f"{sender_u[4] or '—'} (@{m.from_user.username or m.from_user.id})" if sender_u else "Игрок"
-    
-    if is_player:
-        text = f"📩 Вам сообщение от игрока {sender_info}.\n{SEP}\n\n{m.text}"
-    else:
-        text = f"📩 Сообщение от админа.\n{SEP}\n\n{m.text}"
-        
-    try:
-        await bot.send_message(int(uid), text)
-        await m.answer("✅ Отправлено.")
-    except Exception as e: await m.answer(f"❌ Ошибка: {e}")
-    await state.clear()
-    await show_main_menu(await _fake_cb(m), m.from_user.id)
-
 # ==================== АДМИН ПАНЕЛЬ ====================
 @dp.callback_query(F.data == "admin")
 async def admin_menu(c: CallbackQuery):
@@ -532,6 +463,7 @@ async def admin_menu(c: CallbackQuery):
     await safe_edit(c, "🛠 Меню создателя.\n" + SEP, admin_kb())
     await c.answer()
 
+# --- Пользователи ---
 @dp.callback_query(F.data == "admin_users")
 async def admin_users(c: CallbackQuery):
     if not is_admin(c.from_user.id): return
@@ -554,37 +486,125 @@ async def user_view(c: CallbackQuery):
     await show_profile(c, int(c.data.split(":")[1]), admin_view=True)
     await c.answer()
 
-# (Остальные админ-хендлеры: теги, сообщение, редактирование фракций, whitelist, глобальные, карта, rp, backup — они остались как были в прошлой версии, просто я их убрал для экономии места, но они должны быть в файле!)
+# --- Сообщение пользователю (общий хендлер) ---
+@dp.message(Form.admin_send_to_user)
+async def send_to_user(m: Message, state: FSMContext):
+    data = await state.get_data()
+    uid = data.get("target_user")
+    is_player = data.get("is_player_msg", False)
+    
+    sender_u = await db.get_user(m.from_user.id)
+    sender_info = f"{sender_u[4] or '—'} (@{m.from_user.username or m.from_user.id})" if sender_u else "Игрок"
+    
+    if is_player:
+        text = f"📩 Вам сообщение от игрока {sender_info}.\n{SEP}\n\n{m.text}"
+    else:
+        text = f"📩 Сообщение от админа.\n{SEP}\n\n{m.text}"
+        
+    try:
+        await bot.send_message(int(uid), text)
+        await m.answer("✅ Отправлено.")
+    except Exception as e: await m.answer(f"❌ Ошибка: {e}")
+    await state.clear()
+    await show_main_menu(await _fake_cb(m), m.from_user.id)
 
-# Рассылка
-@dp.callback_query(F.data == "admin_broadcast")
-async def admin_broadcast(c: CallbackQuery, state: FSMContext):
+# --- Редактирование чужого профиля ---
+@dp.callback_query(F.data.startswith("aedit:"))
+async def admin_edit_field(c: CallbackQuery, state: FSMContext):
     if not is_admin(c.from_user.id): return
-    await c.message.answer("Введи текст для рассылки всем пользователям:")
-    await state.set_state(Form.admin_broadcast_text)
+    _, field, uid_str = c.data.split(":")
+    uid = int(uid_str)
+
+    if field == "fraction":
+        rows = await db.get_factions()
+        if not rows: return await c.answer("Сначала добавь фракции.", show_alert=True)
+        kb = paginated_kb(rows, 0, PER_PAGE, f"faction_pick:{uid}:", "admin_users", nav_prefix="fpp")
+        await safe_edit(c, f"🎯 Выбери фракцию для пользователя {uid}.\n" + SEP, kb)
+        await c.answer()
+        return
+
+    prompts = {"nick_bot": "Введи новый ник в боте:", "nick_server": "Введи новый ник на сервере Minecraft:", "uuid": "Введи новый UUID:"}
+    await c.message.answer(prompts[field])
+    await state.update_data(target_user=uid, target_field=field)
+    await state.set_state(Form.admin_edit_user)
     await c.answer()
 
-@dp.message(Form.admin_broadcast_text)
-async def broadcast_text(m: Message, state: FSMContext):
-    users = await db.get_all_users()
-    ok, fail = 0, 0
-    for uid, _, _ in users:
-        try:
-            await bot.send_message(uid, f"📢 Уведомление от администрации:\n{SEP}\n\n{m.text}")
-            ok += 1
-        except:
-            fail += 1
-    await m.answer(f"✅ Рассылка завершена.\nДоставлено: {ok}\nОшибок: {fail}")
+@dp.message(Form.admin_edit_user)
+async def admin_edit_user_save(m: Message, state: FSMContext):
+    data = await state.get_data()
+    uid = data.get("target_user")
+    field = data.get("target_field")
+    if uid is None or field is None: return await m.answer("❌ Сессия истекла.")
+    await db.set_user_field(int(uid), field, m.text.strip())
     await state.clear()
-    await admin_menu(await _fake_cb(m))
+    await m.answer("✅ Сохранено.")
+    await show_profile(_FakeCbForProfile(m.from_user), int(uid), admin_view=True)
 
-# ==================== ЗАПУСК ====================
-async def main():
-    await db.init_db()
-    await bot.delete_webhook(drop_pending_updates=True)
-    me = await bot.get_me()
-    logging.info(f"✅ Бот запущен: @{me.username} (id={me.id})")
-    await dp.start_polling(bot)
+# --- Фракции ---
+@dp.callback_query(F.data == "admin_factions")
+async def admin_factions(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return
+    await safe_edit(c, "🚩 Управление фракциями.\n" + SEP, admin_factions_kb())
+    await c.answer()
 
-if __name__ == "__main__":
-    asyncio.run(main())
+@dp.callback_query(F.data == "admin_faction_add")
+async def admin_faction_add(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c.from_user.id): return
+    await c.message.answer("Введи название новой фракции:")
+    await state.set_state(Form.admin_add_faction)
+    await c.answer()
+
+@dp.message(Form.admin_add_faction)
+async def save_faction(m: Message, state: FSMContext):
+    await db.add_faction(m.text.strip())
+    await state.clear()
+    await m.answer("✅ Фракция добавлена.")
+    await admin_factions(await _fake_cb(m))
+
+@dp.callback_query(F.data == "admin_faction_del")
+async def admin_faction_del(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return
+    rows = await db.get_factions()
+    if not rows: return await c.answer("Фракций нет.", show_alert=True)
+    await _render_faction_del_page(c, 0)
+
+async def _render_faction_del_page(c: CallbackQuery, page: int):
+    rows = await db.get_factions()
+    kb = paginated_kb(rows, page, PER_PAGE, "faction_del:", "admin_factions")
+    await safe_edit(c, "🚩 Выбери фракцию для удаления.\n" + SEP, kb)
+
+@dp.callback_query(F.data.startswith("pg:faction_del:"))
+async def faction_del_page(c: CallbackQuery):
+    page = int(c.data.split(":")[2])
+    await _render_faction_del_page(c, page)
+    await c.answer()
+
+@dp.callback_query(F.data.startswith("faction_del:"))
+async def faction_del(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return
+    fid = int(c.data.split(":")[1])
+    await db.remove_faction_by_id(fid)
+    rows = await db.get_factions()
+    if not rows: await safe_edit(c, "✅ Фракция удалена.\n\nСписок фракций пуст.", admin_factions_kb())
+    else: await _render_faction_del_page(c, 0)
+    await c.answer("Удалено")
+
+@dp.callback_query(F.data.startswith("fpp:faction_pick:"))
+async def faction_pick_page(c: CallbackQuery):
+    parts = c.data.split(":")
+    uid = int(parts[2])
+    page = int(parts[3])
+    rows = await db.get_factions()
+    kb = paginated_kb(rows, page, PER_PAGE, f"faction_pick:{uid}:", "admin_users", nav_prefix="fpp")
+    await safe_edit(c, f"🎯 Выбери фракцию для пользователя {uid}.\n" + SEP, kb)
+    await c.answer()
+
+@dp.callback_query(F.data.startswith("faction_pick:"))
+async def faction_pick(c: CallbackQuery):
+    if not is_admin(c.from_user.id): return
+    parts = c.data.split(":")
+    uid = int(parts[1])
+    fid = int(parts[2])
+    rows = await db.get_factions()
+    name = next((n for i, n, _ in rows if i == fid), None)
+    if not name: return await c
