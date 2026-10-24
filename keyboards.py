@@ -1,7 +1,7 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 PER_PAGE = 8
-ALL_TAGS = ["banned", "whitelisted", "processing", "admin"]
+ALL_TAGS = ["banned", "whitelisted", "processing", "admin", "muted"]
 
 def main_kb(is_admin: bool):
     kb = [
@@ -13,7 +13,7 @@ def main_kb(is_admin: bool):
          InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
         [InlineKeyboardButton(text="📜 Правила", callback_data="rules"),
          InlineKeyboardButton(text="ℹ️ Информация", callback_data="info")],
-        [InlineKeyboardButton(text="✉️ Отправить форму", callback_data="form")],
+        [InlineKeyboardButton(text="✉️ Обратная связь", callback_data="form")],
     ]
     if is_admin:
         kb.append([InlineKeyboardButton(text="🛠 Меню создателя", callback_data="admin")])
@@ -60,6 +60,7 @@ def admin_factions_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить фракцию", callback_data="admin_faction_add")],
         [InlineKeyboardButton(text="➖ Удалить фракцию", callback_data="admin_faction_del")],
+        [InlineKeyboardButton(text="👑 Назначить главу", callback_data="admin_faction_leader")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin")],
     ])
 
@@ -99,7 +100,6 @@ def tags_menu_kb(target_user_id: int, current_tags: list):
     kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"user_view:{target_user_id}")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
-# --- Кнопки для интро с эмодзи ---
 def intro_start_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="▶️ Продолжить", callback_data="intro_next")],
@@ -131,6 +131,17 @@ def intro_review_kb(user_id: int):
         [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"intro_reject:{user_id}")]
     ])
 
+# --- Кнопки для форм ---
+def form_menu_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📝 Оставить отзыв", callback_data="form_review")],
+        [InlineKeyboardButton(text="💡 Предложение", callback_data="form_suggest")],
+        [InlineKeyboardButton(text="🐞 Сообщить о баге", callback_data="form_bug")],
+        [InlineKeyboardButton(text="🚨 Жалоба на игрока", callback_data="form_report")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")]
+    ])
+
+# --- Пагинация ---
 def paginated_kb(items, page: int, per_page: int, prefix: str, back_target: str, nav_prefix: str = "pg"):
     total_pages = max(1, (len(items) + per_page - 1) // per_page)
     page = max(0, min(page, total_pages - 1))
