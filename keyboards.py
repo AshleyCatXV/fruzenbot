@@ -81,7 +81,7 @@ def admin_links_kb():
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin")],
     ])
 
-def user_profile_admin_kb(target_user_id: int, tags: list = None):
+def user_profile_admin_kb(target_user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🏷 Теги", callback_data=f"tags_menu:{target_user_id}")],
         [InlineKeyboardButton(text="✉️ Сообщение пользователю", callback_data=f"msg_user:{target_user_id}")],
@@ -100,6 +100,7 @@ def tags_menu_kb(target_user_id: int, current_tags: list):
     kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"user_view:{target_user_id}")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
+# --- Кнопки для интро ---
 def intro_start_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="▶️ Продолжить", callback_data="intro_next")],
